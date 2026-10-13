@@ -163,9 +163,13 @@ amigafs/
 - **Modelling facts pinned while building the tests:** Amiga directories have **no defined order** (entries emerge in hash-bucket order — listing asserts membership, sorting belongs to the FUSE layer); and the synthetic test volume must be exactly **1760 blocks** for the rootblock formula to land on 880.
 - 7/7 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
-### M4 — File data
-- The reversed `data_blocks[]` plus the extension chain for both variants. OFS header cross-checks (`seq_num`, `data_size`, `next_data`) produce a warning, never a silent fix.
-- **Gate:** byte-for-byte match with `unadf` extraction for every file in every fixture, including empty files and files longer than one extension block.
+### M4 — File data ✅ COMPLETE (commit `065bf55`)
+- `file.c`: **both** OFS and FFS read through the reversed `data_blocks[]` table plus the extension chain (file block *i* at index `entries-1-i`). OFS's `seq_num`/`next_data`/`data_size` are cross-checks only. Reads past EOF clamp; hard links resolve through `real_entry`.
+- **Gate: met — all 216 files ADFlib's `unadf` extracts across every fixture are byte-for-byte identical** (sha256 + size), including a 173 847-byte OFS file spanning **five** header/extension blocks and an 80-file Fred Fish disk. Ours is a documented superset by **6 hardlink aliases** (unadf resolves a hard-linked entry to its real file; we expose the link as its own path with identical content).
+- **The bug this milestone caught — and it only appeared against real disks:** directory blocks **do not store `ht_size`** (offsets 8/12/16 are unused there and read 0). Reading that field made **every subdirectory on every Amiga volume appear empty**. Verified across five fixtures; `dir.c` now falls back to the derived table size, and `test_dir` has a reproducing test. This had also been silently capping the M3 gate at depth 1.
+- **A second real bug:** a read spanning a block boundary returned only the first block's tail, because `nblocks` ignored the partial skip inside it (offset 500 of a 512-byte payload needs 2 blocks).
+- **Gate hardening:** exact Python set comparison instead of `comm` (which warns about tab ordering — a warning must never mask a real difference); hashing from stdin because GNU `sha256sum` escapes backslashes in filenames (which corrupted the `win32-names` comparison); `.info` sidecars filtered on both sides.
+- 8/8 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
 ### M5 — Links
 - File hard links: inode = the `real_entry` header block; `st_nlink` counted through the `next_link` chain. Directory hard links become symlinks (C12). Softlinks: Amiga path → POSIX path (C11).
