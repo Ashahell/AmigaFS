@@ -149,11 +149,12 @@ amigafs/
 - **The integration gate earned its keep.** `m1_integration.c` runs the real stack over all 11 floppies: DOS type read correctly, rootblock located by the single formula (**880 for DD, 1760 for the HD fixture automatically**), and **every rootblock validates**. It found a bug unit tests could not: the **bootblock is 1024 bytes and spans blocks 0 and 1**, but `blockdev_read` refused `len > block_size`, so every bootblock read failed. Added `blockdev_read_span()` with whole-span bounds checking. It also caught a bug *in the gate itself* — the DOS id was compared through a host-endian cast, so it never matched big-endian `'D','O','S'`.
 - **Not yet built:** the bounded LRU block cache. Deferred to M8 with its concurrency test (D-level `threads=N` default 1); the blockio contract does not depend on it.
 
-### M2 — Volume open and variant detection
-- DOS type on block 0 or block 1; flags; refuse anything outside `DOS\0`–`\5` with a named reason.
-- Rootblock by formula, validated (see §2.8 for the three cross-check rules).
-- Parse and validate the header, extension, bitmap and dir-cache block types.
-- **Gate:** every fixture reports **exactly** the DOS type recorded in `fixtures.lock` — `DOS\0`×4, `DOS\1`×2, **`DOS\2`×1**, **`DOS\5`×3** — and the rootblock that `adfinfo` reports. `cache_crash.adf` (`DOS\6`) is **refused** with a named reason; the unformatted A590 image is refused cleanly.
+### M2 — Volume open and variant detection ✅ COMPLETE (commit `0583e0b`)
+- `blocktypes.c`: primary+secondary types resolved to one kind (`T_HEADER` is disambiguated by its secondary type; dir-cache is the distinct primary type **33**). Every offset derives from the block size. Dir-cache records are walked by their **variable** length (26–77 bytes) with a word-alignment skip; `records_nb` is **clamped** to what the block can hold, because it is untrusted on-disk data.
+- `volume.c`: DOS id from block 0 **or block 1**; `DOS\0`–`DOS\5` supported; `DOS\6`/`DOS\7` and muFS/PFS **refused by name**; OFS = absence of the FFS bit (`DOS\2`/`DOS\4` are OFS); rootblock located by the single formula then **validated as `T_HEADER`/`ST_ROOT` before trust**.
+- **Gate: met — `m2_gate` PASS on all real fixtures.** Reports exactly the measured types (`DOS\0`×4, `DOS\1`×2, `DOS\2`×1, `DOS\5`×3), rootblock 880 (DD) / 1760 (HD), and `cache_crash.adf` refused as `DOS\6` with a named reason. Volume names agree with ADFlib on all 10 openable fixtures; the one intentional divergence is `cache_crash.adf`, which ADFlib reads as `DOS\6`.
+- **Bugs caught by tests (both silent-corruption class):** the name BCPL string is read at `BSIZE-80` (the length byte), not `BSIZE-79` — the off-by-one would have mangled every filename on every volume; and the DOS id was compared through a host-endian cast so it never matched big-endian `'D','O','S'`.
+- 6/6 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
 ### M3 — Directories
 - Lookup: hash, then bucket, then follow `hash_chain`, comparing with `capitalch` on Latin-1. Listing: the whole table plus chains. A cycle guard bounds the chain length by the block count.
