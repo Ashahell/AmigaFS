@@ -32,6 +32,61 @@ static void add_problem(afs_verify_report_t *out, int *n, int max,
 typedef struct { uint8_t *marks; uint32_t nblocks; int max; } visit_ctx_t;
 
 static void visit_entry(afs_volume_t *v, uint32_t block, visit_ctx_t *vc,
+                        int depth, afs_verify_report_t *rep, int *n, int max);
+
+/* Walk a directory's hash table RAW, with none of the defensive filtering
+ * afs_dir_list applies.
+ *
+ * This is why the verifier cannot delegate its enumeration to afs_dir_list().
+ * A read path is right to drop a pointer it cannot read and to skip a block
+ * whose type it does not recognise -- a filesystem must not die on a bad
+ * pointer, and on real Amiga volumes those filters are what keep a damaged
+ * directory readable. But those two filters are EXACTLY the defects the
+ * verifier exists to report: an out-of-range bucket pointer, and an
+ * unrecognised block type. Enumerating through the filtered reader made both
+ * checks unreachable, so `afs verify` reported neither, ever.
+ *
+ * So the verifier reads the hash table itself. Chains are followed with the
+ * volume's block count as the step bound, so a cycle in the chain data
+ * terminates instead of spinning.
+ */
+static void visit_dir_raw(afs_volume_t *v, uint32_t dirblk, visit_ctx_t *vc,
+                          int depth, afs_verify_report_t *rep, int *n, int max) {
+    if (depth > 32) return;
+    size_t bs = afs_volume_block_size(v);
+    uint8_t *dir = malloc(bs);
+    if (!dir) return;
+    if (afs_volume_read_block(v, dirblk, dir, bs) != 0) { free(dir); return; }
+
+    /* the rootblock stores ht_size at offset 12; a DIRECTORY block does not
+     * and derives it from the block size instead (see dir.c) */
+    uint32_t ht = be32(dir + 12);
+    if (ht == 0) ht = (uint32_t)afs_hash_table_size(bs);
+    if (ht == 0 || (size_t)ht * 4 + 24 > bs) { free(dir); return; }
+
+    uint8_t *eb = malloc(bs);
+    if (!eb) { free(dir); return; }
+
+    for (uint32_t i = 0; i < ht && *n < max; i++) {
+        uint32_t bno = be32(dir + 24 + 4 * i);
+        for (uint32_t step = 0; bno != 0 && step <= vc->nblocks; step++) {
+            uint32_t here = bno;
+            visit_entry(v, here, vc, depth + 1, rep, n, max);
+            if (*n >= max) break;
+            /* an unreadable block ends the chain, exactly as the read path
+             * does -- but the pointer that got us here was already range-checked
+             * by visit_entry, so the bad pointer itself is on the record */
+            if (afs_volume_read_block(v, here, eb, bs) != 0) break;
+            uint32_t next = be32(eb + bs - 16);
+            if (next == here) break;                     /* self-loop guard */
+            bno = next;
+        }
+    }
+    free(eb);
+    free(dir);
+}
+
+static void visit_entry(afs_volume_t *v, uint32_t block, visit_ctx_t *vc,
                         int depth, afs_verify_report_t *rep, int *n, int max) {
     if (depth > 32) return;
     if (block >= vc->nblocks) {
@@ -55,11 +110,13 @@ static void visit_entry(afs_volume_t *v, uint32_t block, visit_ctx_t *vc,
         free(b);
         return;
     }
-    /* checksum at byte 20 for the T_HEADER/T_LIST family, byte 0 for T_DATA */
+    /* The checksum rule is offset-independent: afs_block_valid sums every long
+     * INCLUDING the stored checksum and requires the total to be zero, so the
+     * checksum's own position never enters into it. (An earlier ternary here
+     * offered 20 for both arms while its comment claimed T_DATA used 0; both
+     * spellings pass or fail together, which is why it was never noticed.) */
     uint32_t primary = be32(b);
-    size_t chk_off = (primary == AFS_T_DATA) ? 20 : 20;  /* header family uses 20 */
-    if (primary == AFS_T_DIRCACHE) chk_off = 20;
-    if (!afs_block_valid(b, bs, chk_off)) {
+    if (!afs_block_valid(b, bs, 20)) {
         add_problem(rep, n, max, AFS_PROBLEM_CHECKSUM, block,
                     "block %u checksum invalid", block);
     }
@@ -82,18 +139,7 @@ static void visit_entry(afs_volume_t *v, uint32_t block, visit_ctx_t *vc,
      * and report a false "referenced more than once". The link block itself
      * is still visited, so its checksum and type are checked. */
     if (k == AFS_BLOCK_ROOT || k == AFS_BLOCK_DIR) {
-        uint32_t dirc = be32(b + bs - 8);
-        /* recurse into subdirectories */
-        char name[32];
-        bstr(b + bs - 80, 31, name, sizeof name);
-        (void)name; (void)dirc;
-        /* list this dir and visit its entries */
-        afs_dirent_t ents[256];
-        size_t ec = 0;
-        if (afs_dir_list(v, block, ents, 256, &ec) == 0) {
-            for (size_t i = 0; i < ec; i++)
-                visit_entry(v, ents[i].block, vc, depth + 1, rep, n, max);
-        }
+        visit_dir_raw(v, block, vc, depth + 1, rep, n, max);
     }
     free(b);
 }

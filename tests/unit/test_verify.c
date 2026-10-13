@@ -293,6 +293,78 @@ static void test_verify_reaches_entries_below_the_rootblock(void) {
     CHECK(saw_checksum, "and it is reported as a CHECKSUM problem");
 }
 
+/* A hash bucket pointing OUTSIDE the volume must be reported as RANGE.
+ *
+ * The read path is right to hide this -- afs_dir_list drops a pointer it
+ * cannot read and carries on, because a filesystem must not die on a bad
+ * pointer. But the VERIFIER's whole job is to report exactly what the read
+ * path hides, so it cannot delegate its enumeration to afs_dir_list: a
+ * verifier that does can never see an out-of-range pointer at all. */
+static void test_verify_reports_out_of_range_pointer(void) {
+    enum { NB = 1760, ROOT = 880 };
+    static uint8_t img[NB * BS];
+    memset(img, 0, sizeof img);
+    put_be32(img, ((uint32_t)'D' << 24) | ((uint32_t)'O' << 16) |
+                  ((uint32_t)'S' << 8) | 0x01);
+    uint8_t *r = img + ROOT * BS;
+    put_be32(r + 0, AFS_T_HEADER);
+    put_be32(r + 12, (uint32_t)afs_hash_table_size(BS));
+    put_be32(r + BS - 200, 0xFFFFFFFFu);
+    put_be32(r + BS - 8, 0);
+    r[BS - 80] = 3; memcpy(r + BS - 79, "vol", 3);
+    put_be32(r + BS - 4, AFS_ST_ROOT);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    uint32_t tsz = (uint32_t)afs_hash_table_size(BS);
+    put_be32(r + 24 + 4 * (tsz - 1), 99999u);      /* past the end */
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    int saw_range = 0;
+    for (int i = 0; i < n; i++)
+        if (rep[i].kind == AFS_PROBLEM_RANGE) saw_range = 1;
+    CHECK(saw_range, "a hash bucket pointing past the volume is reported RANGE");
+}
+
+/* An entry block whose type nothing recognises must be reported as TYPE. */
+static void test_verify_reports_unknown_block_type(void) {
+    enum { NB = 1760, ROOT = 880, ENTRY = 900 };
+    static uint8_t img[NB * BS];
+    memset(img, 0, sizeof img);
+    put_be32(img, ((uint32_t)'D' << 24) | ((uint32_t)'O' << 16) |
+                  ((uint32_t)'S' << 8) | 0x01);
+    uint8_t *r = img + ROOT * BS;
+    put_be32(r + 0, AFS_T_HEADER);
+    put_be32(r + 12, (uint32_t)afs_hash_table_size(BS));
+    put_be32(r + BS - 200, 0xFFFFFFFFu);
+    put_be32(r + BS - 8, 0);
+    r[BS - 80] = 3; memcpy(r + BS - 79, "vol", 3);
+    put_be32(r + BS - 4, AFS_ST_ROOT);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    uint8_t *e = img + ENTRY * BS;
+    put_be32(e + 0, 0x00001234u);                 /* primary: not a real type */
+    put_be32(e + BS - 16, 0);
+    put_be32(e + BS - 12, ROOT);
+    put_be32(e + BS - 8, 0);
+    put_be32(e + BS - 4, 0x00001234u);             /* secondary: neither */
+    e[BS - 80] = 4; memcpy(e + BS - 79, "file", 4);
+    put_be32(e + 20, afs_block_checksum(e, BS, 20));
+
+    uint32_t tsz = (uint32_t)afs_hash_table_size(BS);
+    uint32_t b = afs_hash("file", 4, tsz, 0x01);
+    put_be32(r + 24 + 4 * b, ENTRY);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    int saw_type = 0;
+    for (int i = 0; i < n; i++)
+        if (rep[i].kind == AFS_PROBLEM_TYPE && rep[i].block == ENTRY) saw_type = 1;
+    CHECK(saw_type, "an entry block of an unrecognised type is reported TYPE");
+}
+
 int main(void) {
     printf("bitmap / verify\n");
     test_bitmap_block_checksum_rule();
@@ -303,5 +375,7 @@ int main(void) {
     test_verify_flags_bad_bootblock_root();
     test_verify_flags_bad_bitmap();
     test_verify_reaches_entries_below_the_rootblock();
+    test_verify_reports_out_of_range_pointer();
+    test_verify_reports_unknown_block_type();
     TEST_REPORT();
 }
