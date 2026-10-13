@@ -156,10 +156,12 @@ amigafs/
 - **Bugs caught by tests (both silent-corruption class):** the name BCPL string is read at `BSIZE-80` (the length byte), not `BSIZE-79` — the off-by-one would have mangled every filename on every volume; and the DOS id was compared through a host-endian cast so it never matched big-endian `'D','O','S'`.
 - 6/6 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
-### M3 — Directories
-- Lookup: hash, then bucket, then follow `hash_chain`, comparing with `capitalch` on Latin-1. Listing: the whole table plus chains. A cycle guard bounds the chain length by the block count.
-- `dircache.c`: parse records (`be16` fields, padding byte); not used for listing.
-- **Gate:** listings of every fixture match `adfls`, including the DIRC images and `win32-names.adf` (names compared as UTF-8).
+### M3 — Directories ✅ COMPLETE (commit `f173c02`)
+- `dir.c`: lookup = hash → bucket → follow `hash_chain`, comparing with `capitalch` (Amiga case-insensitive; returns the **stored** spelling, so the mount's exact-match policy (D5) is unaffected). Listing walks every bucket and every chain.
+- **Robustness:** every block pointer on this path is untrusted on-disk data. Pointers are bounds-checked before use, chains are bounded by the volume block count, a self-referential chain terminates, and an out-of-range pointer ends the chain. The dir cache is **never consulted** (C4) — a test proves a dangling cache pointer cannot hide a file.
+- **Gate: met — `m3_gate` PASS on all 10 openable fixtures (69 entries), byte-for-byte vs `adfls`**, including the `DOS\5` DIRC images, the accented `français` from the INTL `DOS\2` fixture, the real `same_hash`/`same_hash2`/`same_hash3` collision chain, and both link-chain fixtures.
+- **Modelling facts pinned while building the tests:** Amiga directories have **no defined order** (entries emerge in hash-bucket order — listing asserts membership, sorting belongs to the FUSE layer); and the synthetic test volume must be exactly **1760 blocks** for the rootblock formula to land on 880.
+- 7/7 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
 ### M4 — File data
 - The reversed `data_blocks[]` plus the extension chain for both variants. OFS header cross-checks (`seq_num`, `data_size`, `next_data`) produce a warning, never a silent fix.
