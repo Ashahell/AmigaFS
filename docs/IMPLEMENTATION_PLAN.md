@@ -188,9 +188,14 @@ amigafs/
 - **Rootblock cross-check validated:** `g1a30c.adf`'s bootblock says root=879, but the true rootblock is 880 (verified: 880 is `T_HEADER`/`ST_ROOT`; 879 is an OFS data block). ADFlib tries 879, fails to find an id, and falls back to 880 — agreeing with our single formula. We warn on the mismatch and trust the formula.
 - 10/10 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
-### M7 — RDB and partitions
-- `RDSK` chain, `PART` blocks, DosEnvec geometry (`SizeBlock`, `SectorsPerBlock`, `Reserved`, `LowCyl`, `HighCyl`). Partitions map to subdirectories named after `DriveName`, made unique.
-- **Gate:** the 6-partition A590 image shows all 6 volumes. Each listing matches the oracle where ADFlib's RDB support (marked experimental upstream) agrees. Any disagreement is investigated and recorded, never auto-accepted.
+### M7 — RDB and partitions ✅ COMPLETE (commit `2aff05e`)
+- `rdb.c`: parses the RDB block region and discovers `PART` blocks with their `DriveName` and DosEnvVec (DOS type, geometry, reserved). A partition **starts at `low_cyl × cyl_blks`** and spans `(high_cyl-low_cyl+1) × cyl_blks`, where `cyl_blks = surfaces × sectors_per_track`.
+- **Two facts about real RDB disks, learned by decoding the fixture rather than assuming:**
+  1. `PART` blocks are found by **scanning** the RDB region, **not** by following `RDSK.next` — on the real A590 image `RDSK.next` is 512 while the six `PART` blocks live at blocks 1–6.
+  2. `start_block = low_cyl × cyl_blks`, **not** a running sum (I assumed sequential packing first and got the wrong starts; the bootblock DOS-id check caught it immediately).
+- **Gate: met — `m7_gate` PASS against amitools `rdbtool`** (authoritative here, since ADFlib's RDB support is experimental). All six partitions found with matching names and DOS types — OFS, OFS INTL, OFS DirCache, FFS, FFS INTL, FFS DirCache — and the decisive check: **every computed start block actually holds its declared DOS type on disk**. This one image covers all six supported DOS types end to end.
+- **Two real defects the tests caught:** an unbounded block-header read in the scan (a heap over-read the sanitizer found), and the missing whole-block range check before `memcmp`.
+- 11/11 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
 ### M8 — FUSE3 shell
 - Low-level API: `lookup`, `forget`, `getattr`, `opendir`/`readdir`/`releasedir`, `open`/`read`/`release`, `readlink`, `statfs`, `getxattr`/`listxattr`. Mount options forced: `ro`, `default_permissions`.
