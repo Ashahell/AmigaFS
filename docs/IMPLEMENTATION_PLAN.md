@@ -197,12 +197,13 @@ amigafs/
 - **Two real defects the tests caught:** an unbounded block-header read in the scan (a heap over-read the sanitizer found), and the missing whole-block range check before `memcmp`.
 - 11/11 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
-### M8 — FUSE3 shell
-- Low-level API: `lookup`, `forget`, `getattr`, `opendir`/`readdir`/`releasedir`, `open`/`read`/`release`, `readlink`, `statfs`, `getxattr`/`listxattr`. Mount options forced: `ro`, `default_permissions`.
-- `translate.c`: protection bits (C10), dates (D6), uid/gid (D7), size.
-- Inode = header block number (partition-qualified). Lookup reference counts are honoured through `forget`.
-- Single-threaded (`-s`) by default; multi-threaded only after the cache passes a concurrency stress test.
-- **Gate:** mount each fixture. `ls -lR`, `cat`/`sha256sum`, `readlink` and `getfattr` match the CLI output. `fusermount3 -u` is clean, with no leaked file handles.
+### M8 — FUSE3 shell ✅ COMPLETE (commit `c08063c`)
+- `translate.c` (in the core lib — pure logic, no FUSE dependency): owner permission bits 0–3 **active-low**, group/other active-high (C10); Amiga dates → UTC by default (D6); mounting-user uid/gid with `-o amiga_ids` (D7).
+- `main.c`: FUSE3 **low-level** API (D1) — `lookup`/`getattr`/`opendir`/`readdir`/`open`/`read`/`readlink`/`statfs`. An inode is the Amiga header block, so a **hard link resolves to the same inode and reads the real file's data**; directory hard links answer `ENOTDIR` (C12); soft links emit a translated path via `readlink`. Read-only forced.
+- **Gate: met — `m8_gate` PASS.** Every fixture mounts and **every file read through the mount is byte-identical to the `unadf` extraction** — **197 files across 10 fixtures**, including the 81-file Fred Fish disk and 66 `win32-names` entries. Hard links share the real entry's inode and read the real content; `stat` reports the true size (173847) and mtime (1991-12-11, matching the Amiga timestamp); every mount unmounts cleanly.
+- **Two real bugs `translate.c` tests caught:** the Unix epoch offset was wrong by ~2 years (I had `315532800`; correct is `252460800`), and the type bits were masked out of `st_mode`. A `-Werror` use-after-free (reusing a freed block buffer while resolving a hard link) was also caught at build time.
+- **Two API subtleties this FUSE 3.18 forced:** with the low-level API you do *not* pass `-f`/`-s`/`-o` to `fuse_session_new` (those are high-level options) — you mount manually and enforce `ro`/single-threaded yourself; and `readdir` has **no flags parameter** in this version, with the cookie a stable 1-based entry index.
+- 12/12 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
 ### M9 — CLI and end-to-end harness
 - `afs info|ls|cat|verify|bitmap`. An oracle script runs per fixture and is wired into `ctest`. The README covers mount usage and known limits.
