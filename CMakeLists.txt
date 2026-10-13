@@ -86,11 +86,19 @@ target_link_libraries(amigafs-fuse PRIVATE ${FUSE3_LIBRARIES})
 add_executable(afs src/cli/main.c)
 target_link_libraries(afs PRIVATE amigafs_core)
 
+# ------------------------------------------- verifier + robustness gates ----
+# m6_damage_probe is the NEGATIVE CONTROL for the structure verifier: it
+# damages each reachable block and requires the verifier to name it. Without it
+# a verifier that never descends past the rootblock still "passes" by agreeing
+# with ADFlib on the hostile disk.
+add_executable(m6_damage_probe tests/oracle/m6_damage_probe.c)
+target_link_libraries(m6_damage_probe PRIVATE amigafs_core)
+
 # ------------------------------------------------- oracle / integration gates ----
 # These compare the core library against pinned external oracles (ADFlib CLI,
 # amitools) and, for M8, against a real FUSE mount. They need the fixtures and
 # the oracles present, so they are registered but skipped cleanly when not.
-set(AMIGAFS_GATES m0_gate m2_gate m3_gate m4_gate m5_gate m7_gate m8_gate)
+set(AMIGAFS_GATES m0_gate m2_gate m3_gate m4_gate m5_gate m6_gate m7_gate m8_gate fuzz_gate)
 foreach(g ${AMIGAFS_GATES})
   add_test(NAME gate_${g}
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/oracle/${g}.sh)

@@ -227,6 +227,72 @@ static void test_verify_flags_bad_bitmap(void) {
     CHECK(saw_bm, "an invalid / corrupt bitmap is flagged");
 }
 
+/* REGRESSION: the verifier must REACH the entries hanging off the rootblock.
+ *
+ * Every other test in this file builds a volume whose rootblock hash table is
+ * EMPTY, so a verifier that only ever looked at the rootblock passed all of
+ * them. That is the gap this test closes: a damage in a block BELOW the
+ * rootblock must be reported, at the block where it was found.
+ *
+ * The volume here is otherwise valid, so the ONLY thing that can produce a
+ * report entry is the traversal itself. */
+static void test_verify_reaches_entries_below_the_rootblock(void) {
+    enum { NB = 1760, ROOT = 880, ENTRY = 900 };
+    static uint8_t img[NB * BS];
+    memset(img, 0, sizeof img);
+    put_be32(img, ((uint32_t)'D' << 24) | ((uint32_t)'O' << 16) |
+                  ((uint32_t)'S' << 8) | 0x01);              /* FFS */
+
+    uint8_t *r = img + ROOT * BS;
+    put_be32(r + 0, AFS_T_HEADER);
+    put_be32(r + 12, (uint32_t)afs_hash_table_size(BS));
+    put_be32(r + BS - 200, 0xFFFFFFFFu);                      /* bitmap valid */
+    put_be32(r + BS - 196, 0);                               /* no bitmap blk */
+    put_be32(r + BS - 96, 0);
+    put_be32(r + BS - 8, 0);
+    r[BS - 80] = 3; memcpy(r + BS - 79, "vol", 3);
+    put_be32(r + BS - 4, AFS_ST_ROOT);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    /* one FILE entry below the rootblock, correctly checksummed */
+    uint8_t *e = img + ENTRY * BS;
+    put_be32(e + 0, AFS_T_HEADER);
+    put_be32(e + BS - 16, 0);                                /* no chain */
+    put_be32(e + BS - 12, ROOT);                             /* parent */
+    put_be32(e + BS - 8, 0);                                 /* no extension */
+    put_be32(e + BS - 4, AFS_ST_FILE);
+    e[BS - 80] = 4; memcpy(e + BS - 79, "file", 4);
+    put_be32(e + 20, afs_block_checksum(e, BS, 20));
+
+    /* file it in the rootblock's hash table under its own name */
+    uint32_t tsz = (uint32_t)afs_hash_table_size(BS);
+    uint32_t bucket = afs_hash("file", 4, tsz, 0x01);
+    put_be32(r + 24 + 4 * bucket, ENTRY);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    int reported_entry = 0;
+    for (int i = 0; i < n; i++)
+        if (rep[i].block == ENTRY) reported_entry = 1;
+    CHECK(!reported_entry,
+          "an undamaged entry below the rootblock draws no report (sanity: "
+          "the volume is otherwise clean, so anything named here is a bug)");
+
+    /* now damage that entry's payload and leave the checksum stale */
+    e[300] ^= 0xFF;
+    n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    reported_entry = 0;
+    int saw_checksum = 0;
+    for (int i = 0; i < n; i++) {
+        if (rep[i].block == ENTRY) reported_entry = 1;
+        if (rep[i].block == ENTRY && rep[i].kind == AFS_PROBLEM_CHECKSUM)
+            saw_checksum = 1;
+    }
+    CHECK(reported_entry, "damage below the rootblock is reported AT that block");
+    CHECK(saw_checksum, "and it is reported as a CHECKSUM problem");
+}
+
 int main(void) {
     printf("bitmap / verify\n");
     test_bitmap_block_checksum_rule();
@@ -236,5 +302,6 @@ int main(void) {
     test_verify_detects_bad_rootblock();
     test_verify_flags_bad_bootblock_root();
     test_verify_flags_bad_bitmap();
+    test_verify_reaches_entries_below_the_rootblock();
     TEST_REPORT();
 }

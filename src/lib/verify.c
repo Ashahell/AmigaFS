@@ -73,7 +73,15 @@ static void visit_entry(afs_volume_t *v, uint32_t block, visit_ctx_t *vc,
         return;
     }
 
-    if (k == AFS_BLOCK_DIR || k == AFS_BLOCK_LINKDIR) {
+    /* Recurse into anything that CONTAINS entries. AFS_BLOCK_ROOT is the
+     * crucial one: afs_verify_memory starts the walk at the rootblock, whose
+     * kind is ROOT, not DIR -- so testing only DIR/LINKDIR meant the walk
+     * never left block 1 and every check below was dead code on a real
+     * volume. LINKDIR is deliberately NOT descended: a hard-linked directory
+     * is a cycle (C12), and following it would re-visit the real directory
+     * and report a false "referenced more than once". The link block itself
+     * is still visited, so its checksum and type are checked. */
+    if (k == AFS_BLOCK_ROOT || k == AFS_BLOCK_DIR) {
         uint32_t dirc = be32(b + bs - 8);
         /* recurse into subdirectories */
         char name[32];
