@@ -133,8 +133,9 @@ int afs_volume_open_memory(void *data, size_t size, size_t bsize,
     return 0;
 }
 
-int afs_volume_open_file(const char *path, size_t bsize, uint32_t start_block,
-                         afs_volume_t **out, char *errbuf, size_t errlen) {
+int afs_volume_open_window(const char *path, size_t bsize,
+                           uint32_t start_block, uint32_t nblocks,
+                           afs_volume_t **out, char *errbuf, size_t errlen) {
     if (out) *out = NULL;
     afs_volume_t *v = calloc(1, sizeof *v);
     if (!v) { set_err(errbuf, errlen, "out of memory"); return -1; }
@@ -146,8 +147,30 @@ int afs_volume_open_file(const char *path, size_t bsize, uint32_t start_block,
         free(v);
         return -1;
     }
-    if (start_block) {
-        uint32_t n = blockdev_block_count(base) - start_block;
+    uint32_t total = blockdev_block_count(base);
+    if (start_block >= total) {
+        set_err(errbuf, errlen,
+                "partition starts at block %u but the image holds %u blocks",
+                start_block, total);
+        blockdev_close(base);
+        free(v);
+        return -1;
+    }
+    if (start_block || nblocks) {
+        /* nblocks == 0 means "to the end of the image", which is what a
+         * floppy-sized volume wants. A PARTITION must pass its real length:
+         * a window running to the end of the image puts the computed
+         * rootblock in the middle of the NEXT partition, so only the last
+         * partition on a disk would open. */
+        uint32_t n = nblocks ? nblocks : (total - start_block);
+        if ((uint64_t)start_block + (uint64_t)n > (uint64_t)total) {
+            set_err(errbuf, errlen,
+                    "partition window [%u,%u) extends past the %u-block image",
+                    start_block, start_block + n, total);
+            blockdev_close(base);
+            free(v);
+            return -1;
+        }
         v->dev = blockdev_window(base, start_block, n);
         if (!v->dev) {
             set_err(errbuf, errlen, "invalid partition window in '%s'", path);
@@ -177,6 +200,12 @@ int afs_volume_open_file(const char *path, size_t bsize, uint32_t start_block,
     }
     if (out) *out = v;
     return 0;
+}
+
+int afs_volume_open_file(const char *path, size_t bsize, uint32_t start_block,
+                         afs_volume_t **out, char *errbuf, size_t errlen) {
+    /* a whole image, or a partition that runs to the end of it */
+    return afs_volume_open_window(path, bsize, start_block, 0, out, errbuf, errlen);
 }
 
 void afs_volume_close(afs_volume_t *v) {

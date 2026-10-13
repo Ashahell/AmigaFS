@@ -26,6 +26,23 @@ typedef struct afs_volume afs_volume_t;
 int afs_volume_open_memory(void *data, size_t size, size_t bsize,
                            afs_volume_t **out, char *errbuf, size_t errlen);
 
+/* Open a PARTITION of an RDB-partitioned image.
+ *
+ * Inside a partition every AmigaDOS block pointer is partition-relative, so a
+ * partition is a WINDOW of exactly its own block range -- `nblocks` long, not
+ * "from here to the end of the image". Getting that length wrong is not a
+ * rounding error: the rootblock is computed from the volume's own block count
+ * as (2 + last)/2, so an over-long window puts the rootblock in the middle of
+ * the NEXT partition and the open fails. On a six-partition disk that leaves
+ * exactly one partition mountable -- the last, whose window length happens to
+ * be right by accident.
+ *
+ * `nblocks` == 0 means "to the end of the image", which is what a whole
+ * floppy wants; afs_volume_open_file() is the nblocks==0 spelling of this. */
+int afs_volume_open_window(const char *path, size_t bsize,
+                           uint32_t start_block, uint32_t nblocks,
+                           afs_volume_t **out, char *errbuf, size_t errlen);
+
 /* Open a volume from a file. */
 int afs_volume_open_file(const char *path, size_t bsize, uint32_t start_block,
                          afs_volume_t **out, char *errbuf, size_t errlen);
