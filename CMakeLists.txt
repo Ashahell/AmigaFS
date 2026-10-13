@@ -20,6 +20,7 @@ add_library(amigafs_core STATIC
   src/lib/blockio.c
   src/lib/blocktypes.c
   src/lib/volume.c
+  src/lib/dir.c
 
 )
 target_include_directories(amigafs_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -34,6 +35,7 @@ set(AMIGAFS_UNIT_TESTS
   test_blockio
   test_blocktypes
   test_volume
+  test_dir
 
 
 )
@@ -48,3 +50,5 @@ add_executable(m1_integration tests/oracle/m1_integration.c)
 target_link_libraries(m1_integration PRIVATE amigafs_core)
 add_executable(m2_gate tests/oracle/m2_gate.c)
 target_link_libraries(m2_gate PRIVATE amigafs_core)
+add_executable(m3_ls tests/oracle/m3_ls.c)
+target_link_libraries(m3_ls PRIVATE amigafs_core)
