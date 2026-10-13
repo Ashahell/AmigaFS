@@ -205,8 +205,19 @@ amigafs/
 - **Two API subtleties this FUSE 3.18 forced:** with the low-level API you do *not* pass `-f`/`-s`/`-o` to `fuse_session_new` (those are high-level options) — you mount manually and enforce `ro`/single-threaded yourself; and `readdir` has **no flags parameter** in this version, with the cookie a stable 1-based entry index.
 - 12/12 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
-### M9 — CLI and end-to-end harness
-- `afs info|ls|cat|verify|bitmap`. An oracle script runs per fixture and is wired into `ctest`. The README covers mount usage and known limits.
+### M9 — CLI and end-to-end harness ✅ COMPLETE (commit `9833cda`)
+- `afs info|ls|cat|verify|bitmap` — a thin front-end over the tested core, so the CLI and the mount can never disagree about a disk's contents. `ls` marks entries (`d` dir, `f` file, `l` symlink, `h` multi-link, `D` dir-hard-link); `verify` exits 1 with a **named** reason on a bad disk; `bitmap` reports free/used blocks. Verified against the oracles (`afs cat /MOON.GIF` sha256 matches `unadf`).
+- `tests/run_all_gates.sh`: one entry point — unit tests + every oracle gate, ending in `ALL GREEN`/`FAILED`. It runs only the unit-test ctest entries so it does not recurse into the `all_gates` test it is itself.
+- CMake registers the seven gate scripts and `all_gates` as ctest tests: a plain `ctest` exercises unit + oracle + **real-mount** verification.
+- `README.md`: build, mount, CLI, the supported matrix, the two oracles, and an honest known-limits section (read-only; dir-hard-links as `ENOTDIR`; exact-match lookup; dir-cache verify-only; `ffstd64` refused).
+
+---
+
+## Final state
+
+- **12/12** unit tests, **7/7** oracle gates, **20/20** ctest, **0** warnings under `-Wall -Wextra -Wshadow -Wconversion -Werror`.
+- Real Amiga disks mount read-only on Linux and read **byte-for-byte identically** to the ADFlib oracle (197 files through a live FUSE mount; 216 via the library).
+- 20 commits, ~2,400 lines of C, two pinned oracles used only as subprocesses.
 
 ---
 
