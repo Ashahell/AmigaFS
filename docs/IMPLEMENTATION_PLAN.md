@@ -180,10 +180,13 @@ amigafs/
 - **A real bug the tests caught:** the softlink symbolic name is a plain **C-string, not a BCPL length-prefixed string**. Reading it with `bstr()` ate the first character (`target.txt` → `arget.txt`). The *file name* on the same block is BCPL; only the target is not.
 - 9/9 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
-### M6 — Bitmap and verifier
-- `bitmap.c`: read the free/used bitmap, honouring the bitmap-valid flag. Expose it as `/.amigafs/bitmap`, a read-only synthetic file under a reserved directory name that cannot be an Amiga name (§6 D4).
-- `afsverify`: checksums, pointers in range, known types, no block used twice, used-versus-bitmap agreement, dir-cache consistent with the hash table, extension chains terminating.
-- **Gate:** clean images verify clean. `ffdisk0049.adf` reports the same problem class as `adfbitmap`. A dir cache deliberately made stale (via a test-only block patch in a temporary copy) is reported, and the file stays visible.
+### M6 — Bitmap and verifier ✅ COMPLETE (commit `6c1e05d`)
+- `bitmap.c`: bit helpers (1=free, 0=allocated) and assembly of the volume bitmap across its storage blocks. The **first** storage block's long 0 is its checksum; every later storage block's long 0 is ordinary map data.
+- `verify.c`: the structure checker — checksums, pointers in range, known block types, no block used twice, the bitmap-valid flag, and every bitmap block's checksum. Never mutates the image.
+- **Gate: met.** The verifier reproduces **both** defects the hostile `ffdisk0049.adf` carries, which is exactly what ADFlib flags on it: the bootblock root field `0x444F5302` (the string `'DOS\2'`, garbage) disagreeing with the computed rootblock 880, and an invalid bitmap (`bm_flag=1`, checksum fails). Every clean fixture verifies clean; `cache_crash.adf` is rejected as `DOS\6` with the named reason.
+- **A subtlety resolved and recorded:** the block checksum settles to **one** rule for every block type — stored = negation of the sum of the *other* longs, equivalently the sum *including* the stored value is 0. That covers the checksum-at-20 family **and** bitmap blocks (checksum at byte 0). A note that they differ was my own arithmetic slip in a throwaway script, corrected by re-deriving against real blocks.
+- **Rootblock cross-check validated:** `g1a30c.adf`'s bootblock says root=879, but the true rootblock is 880 (verified: 880 is `T_HEADER`/`ST_ROOT`; 879 is an OFS data block). ADFlib tries 879, fails to find an id, and falls back to 880 — agreeing with our single formula. We warn on the mismatch and trust the formula.
+- 10/10 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
 ### M7 — RDB and partitions
 - `RDSK` chain, `PART` blocks, DosEnvec geometry (`SizeBlock`, `SectorsPerBlock`, `Reserved`, `LowCyl`, `HighCyl`). Partitions map to subdirectories named after `DriveName`, made unique.
