@@ -213,7 +213,43 @@ amigafs/
 
 ---
 
-## Final state
+## M6 hardening — three verifier bugs found by adversarial testing (2026-10-13)
+
+The verifier's own tests all built volumes whose rootblock hash table was
+**empty**, and the one oracle fixture it was checked against (`ffdisk0049.adf`)
+has only rootblock- and bitmap-level defects — both detected during *open*. So
+a verifier that never looked below the rootblock passed every gate. Three
+distinct defects, each found the same way: build a volume that violates a
+documented check on purpose and see whether the check fires.
+
+1. **The walk never left the rootblock.** `visit_entry` recursed only on
+   `AFS_BLOCK_DIR`/`LINKDIR`, but the entry point is the rootblock, whose kind
+   is `AFS_BLOCK_ROOT`. Every volume verified exactly one block; the checksum,
+   type, range and double-use checks were dead code. Measured: **0 of 74**
+   injected damages detected across four fixtures.
+2. **RANGE and TYPE could never fire.** The verifier enumerated via
+   `afs_dir_list`, which is right to drop an unreadable pointer and to skip an
+   unrecognised block — and those two filters *are* the defects the verifier
+   exists to report. Fixed by walking the hash table raw (`visit_dir_raw`). The
+   read path stays defensive; the verifier deliberately does not.
+3. **A block could be both bitmap storage and a file.** Bitmap pages were never
+   entered into the double-use set, so the collision was structurally
+   undetectable. Found via amitools, which rejects `g1a30c.adf` as
+   "Bitmap Block Count Mismatch" where we reported one unrelated problem.
+   Block 948 is bitmap page 2 *and* a file: writing either corrupts the other,
+   and the bitmap is what decides whether a write is in bounds.
+
+Also: `g1a30c.adf` was mis-filed as a clean fixture. It carries three defects.
+
+**New in CI:** `m6_gate.sh` (previously M6 had *no* gate — `m6_verify` only
+prints and always returns 0), `m6_damage_probe` (222/222 injected damages
+detected), and `fuzz_gate.sh` (`fuzz_test.c` under ASan+UBSan, asserting it
+*reached* the parser so a green run cannot mean "every image was refused").
+Both new checks were confirmed load-bearing by reverting the fix and watching
+them go red.
+
+---
+
 
 - **12/12** unit tests, **7/7** oracle gates, **20/20** ctest, **0** warnings under `-Wall -Wextra -Wshadow -Wconversion -Werror`.
 - Real Amiga disks mount read-only on Linux and read **byte-for-byte identically** to the ADFlib oracle (197 files through a live FUSE mount; 216 via the library).
