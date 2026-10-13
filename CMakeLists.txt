@@ -81,3 +81,25 @@ target_compile_options(amigafs-fuse PRIVATE -DFUSE_USE_VERSION=31 ${FUSE3_CFLAGS
 target_include_directories(amigafs-fuse PRIVATE ${FUSE3_INCLUDE_DIRS})
 target_link_directories(amigafs-fuse PRIVATE ${FUSE3_LIBRARY_DIRS})
 target_link_libraries(amigafs-fuse PRIVATE ${FUSE3_LIBRARIES})
+
+# ------------------------------------------------------------------- CLI ----
+add_executable(afs src/cli/main.c)
+target_link_libraries(afs PRIVATE amigafs_core)
+
+# ------------------------------------------------- oracle / integration gates ----
+# These compare the core library against pinned external oracles (ADFlib CLI,
+# amitools) and, for M8, against a real FUSE mount. They need the fixtures and
+# the oracles present, so they are registered but skipped cleanly when not.
+set(AMIGAFS_GATES m0_gate m2_gate m3_gate m4_gate m5_gate m7_gate m8_gate)
+foreach(g ${AMIGAFS_GATES})
+  add_test(NAME gate_${g}
+           COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/oracle/${g}.sh)
+  set_tests_properties(gate_${g} PROPERTIES TIMEOUT 300)
+endforeach()
+
+# the end-to-end harness as a single ctest entry
+add_test(NAME all_gates
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_all_gates.sh)
+set_tests_properties(all_gates PROPERTIES TIMEOUT 900)
+
+enable_testing()
