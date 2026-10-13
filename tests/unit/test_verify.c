@@ -365,6 +365,107 @@ static void test_verify_reports_unknown_block_type(void) {
     CHECK(saw_type, "an entry block of an unrecognised type is reported TYPE");
 }
 
+/* A block claimed as bitmap storage that is ALSO a real directory entry is a
+ * double use, and a dangerous one: the same physical block backs both a file
+ * and the allocation map, so writing either silently corrupts the other.
+ *
+ * The real g1a30c.adf has exactly this -- block 948 is bitmap page 2 and a
+ * file in the tree at the same time (amitools flags the disk as
+ * "Bitmap Block Count Mismatch"; ADFlib does not). It went unreported because
+ * bitmap pages were never entered into the double-use set, so the check that
+ * would have caught it never had them to compare against. */
+static void test_verify_reports_bitmap_page_used_as_a_file(void) {
+    enum { NB = 1760, ROOT = 880, BITMAP1 = 881, BITMAP2 = 900, ENTRY = 901 };
+    static uint8_t img[NB * BS];
+    memset(img, 0, sizeof img);
+    put_be32(img, ((uint32_t)'D' << 24) | ((uint32_t)'O' << 16) |
+                  ((uint32_t)'S' << 8) | 0x01);
+    uint8_t *r = img + ROOT * BS;
+    put_be32(r + 0, AFS_T_HEADER);
+    put_be32(r + 12, (uint32_t)afs_hash_table_size(BS));
+    put_be32(r + BS - 200, 0xFFFFFFFFu);            /* bitmap marked valid */
+    put_be32(r + BS - 196, BITMAP1);               /* page 1 */
+    put_be32(r + BS - 192, BITMAP2);               /* page 2 -- one too many */
+    put_be32(r + BS - 8, 0);
+    r[BS - 80] = 3; memcpy(r + BS - 79, "vol", 3);
+    put_be32(r + BS - 4, AFS_ST_ROOT);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    /* both bitmap pages are well-formed bitmap blocks */
+    for (int p = 0; p < 2; p++) {
+        uint8_t *bm = img + (p ? BITMAP2 : BITMAP1) * BS;
+        memset(bm, 0, BS);
+        put_be32(bm, afs_block_checksum(bm, BS, 0));
+    }
+    /* ...and BITMAP2 is ALSO a file entry in the tree */
+    uint8_t *e = img + BITMAP2 * BS;
+    put_be32(e + 0, AFS_T_HEADER);
+    put_be32(e + BS - 16, 0);
+    put_be32(e + BS - 12, ROOT);
+    put_be32(e + BS - 8, 0);
+    put_be32(e + BS - 4, AFS_ST_FILE);
+    e[BS - 80] = 4; memcpy(e + BS - 79, "evil", 4);
+    put_be32(e + 20, afs_block_checksum(e, BS, 20));
+    /* and a separate, honest file entry exists too */
+    uint8_t *f = img + ENTRY * BS;
+    put_be32(f + 0, AFS_T_HEADER);
+    put_be32(f + BS - 16, 0);
+    put_be32(f + BS - 12, ROOT);
+    put_be32(f + BS - 8, 0);
+    put_be32(f + BS - 4, AFS_ST_FILE);
+    f[BS - 80] = 4; memcpy(f + BS - 79, "good", 4);
+    put_be32(f + 20, afs_block_checksum(f, BS, 20));
+
+    uint32_t tsz = (uint32_t)afs_hash_table_size(BS);
+    put_be32(r + 24 + 4 * afs_hash("evil", 4, tsz, 0x01), BITMAP2);
+    put_be32(r + 24 + 4 * afs_hash("good", 4, tsz, 0x01), ENTRY);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    int saw_double = 0, saw_count = 0;
+    for (int i = 0; i < n; i++) {
+        if (rep[i].kind == AFS_PROBLEM_DOUBLE_USE && rep[i].block == BITMAP2)
+            saw_double = 1;
+        if (rep[i].kind == AFS_PROBLEM_BITMAP_MISMATCH &&
+            strstr(rep[i].detail, "bitmap block count"))
+            saw_count = 1;
+    }
+    CHECK(saw_double, "a block that is both a bitmap page and a file is a "
+                      "DOUBLE USE");
+    CHECK(saw_count, "a bitmap page count larger than the volume needs is "
+                     "reported");
+}
+
+/* The control for the test above: the correct page count must NOT be flagged. */
+static void test_verify_accepts_correct_bitmap_page_count(void) {
+    enum { NB = 1760, ROOT = 880, BITMAP1 = 881 };
+    static uint8_t img[NB * BS];
+    memset(img, 0, sizeof img);
+    put_be32(img, ((uint32_t)'D' << 24) | ((uint32_t)'O' << 16) |
+                  ((uint32_t)'S' << 8) | 0x01);
+    uint8_t *r = img + ROOT * BS;
+    put_be32(r + 0, AFS_T_HEADER);
+    put_be32(r + 12, (uint32_t)afs_hash_table_size(BS));
+    put_be32(r + BS - 200, 0xFFFFFFFFu);
+    put_be32(r + BS - 196, BITMAP1);               /* exactly one page */
+    put_be32(r + BS - 8, 0);
+    r[BS - 80] = 3; memcpy(r + BS - 79, "vol", 3);
+    put_be32(r + BS - 4, AFS_ST_ROOT);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+    uint8_t *bm = img + BITMAP1 * BS;
+    memset(bm, 0, BS);
+    put_be32(bm, afs_block_checksum(bm, BS, 0));
+
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    int saw_count = 0;
+    for (int i = 0; i < n; i++)
+        if (rep[i].kind == AFS_PROBLEM_BITMAP_MISMATCH &&
+            strstr(rep[i].detail, "bitmap block count")) saw_count = 1;
+    CHECK(!saw_count, "one bitmap page for a 1760-block volume is correct");
+}
+
 int main(void) {
     printf("bitmap / verify\n");
     test_bitmap_block_checksum_rule();
@@ -377,5 +478,7 @@ int main(void) {
     test_verify_reaches_entries_below_the_rootblock();
     test_verify_reports_out_of_range_pointer();
     test_verify_reports_unknown_block_type();
+    test_verify_reports_bitmap_page_used_as_a_file();
+    test_verify_accepts_correct_bitmap_page_count();
     TEST_REPORT();
 }

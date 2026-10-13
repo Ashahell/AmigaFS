@@ -57,10 +57,14 @@ multiple hard links, `D` directory hard link.
 - **Files:** regular files, directories, hard links (one shared inode, real
   content), soft links (Amiga path syntax translated to a mount-relative POSIX
   path), empty files, and files spanning many extension blocks.
-- **Verification:** `afs verify` checks block checksums, pointers in range,
-  known block types, double-referenced blocks, the bootblock root field against
-  the computed rootblock, the bitmap-valid flag, and each bitmap block's
-  checksum.
+- **Verification:** `afs verify` walks the directory tree reading the hash
+  table **raw** — deliberately not through the same reader the filesystem uses,
+  because that reader drops bad pointers and unrecognised blocks, and those are
+  exactly the defects worth reporting. It checks block checksums, pointers in
+  range, known block types, double-referenced blocks, the bootblock root field
+  against the computed rootblock, the bitmap-valid flag, the bitmap page count
+  against the volume size, blocks claimed as both bitmap and file, and each
+  bitmap block's checksum. Exit status is 1 if anything is found.
 
 ## Known limits
 

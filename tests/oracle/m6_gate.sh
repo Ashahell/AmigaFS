@@ -46,9 +46,15 @@ for fx in testffs.adf testofs.adf arccsh.adf links.adf testhd.adf \
 done
 
 # ---- 2. damaged disks must match ADFlib ----------------------------------
-# g1a30c.adf is NOT clean: its bootblock root field says 879 while the computed
-# rootblock is 880. ADFlib reports the same disagreement (verified), so this is
-# a true finding and the fixture was simply mis-filed as clean until now.
+# g1a30c.adf is NOT clean, and carries THREE defects:
+#   - its bootblock root field says 879 while the computed rootblock is 880
+#     (ADFlib reports the identical disagreement);
+#   - block 948 is bitmap page 2 AND a file in the tree at the same time, so
+#     writing either silently corrupts the other (amitools flags the disk as
+#     "Bitmap Block Count Mismatch"; ADFlib does not);
+#   - consequently the bitmap page count (2) exceeds what 1760 blocks need (1).
+# It had been mis-filed as clean until the verifier was made able to see below
+# the rootblock at all.
 check_known() {
     fx="$1"; shift
     p="$FIX/$fx"
@@ -69,7 +75,9 @@ check_known() {
     fi
 }
 check_known ffdisk0049.adf 'bootblock root field' 'bitmap flagged invalid'
-check_known g1a30c.adf   'bootblock root field 879 disagrees'
+check_known g1a30c.adf   'bootblock root field 879 disagrees' \
+                        'is both bitmap page 2 and a directory entry' \
+                        'bitmap block count 2'
 
 echo "  -- ADFlib corroboration of each known defect --"
 adflog=$(mktemp)
@@ -86,6 +94,19 @@ else
     bad "g1a30c.adf ADFlib corroboration"
 fi
 rm -f "$adflog"
+
+echo "  -- amitools corroboration (it sees what ADFlib does not) --"
+# amitools refuses the DOS\6 disk with a Python traceback where we refuse it
+# by name, and it does not implement hard/soft links, so it can only speak to
+# the bitmap finding on g1a30c.
+g1log=$(mktemp)
+if xdftool "$FIX/g1a30c.adf" list > "$g1log" 2>&1; then :; fi
+if grep -q 'Bitmap Block Count Mismatch' "$g1log"; then
+    note "g1a30c.adf" "amitools: bitmap count mismatch confirmed"
+else
+    bad "g1a30c.adf amitools corroboration"
+fi
+rm -f "$g1log"
 
 # ---- 3. negative control: injected damage must be detected ---------------
 if [ -x "$BIN/m6_damage_probe" ]; then

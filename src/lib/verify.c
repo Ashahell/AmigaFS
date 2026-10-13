@@ -195,14 +195,28 @@ int afs_verify_memory(const uint8_t *img, size_t size, size_t bsize,
         if (rb->bm_flag != 0xFFFFFFFFu)
             add_problem(out, &n, max, AFS_PROBLEM_BITMAP_MISMATCH, 0,
                         "bitmap flagged invalid (bm_flag=0x%08x)", rb->bm_flag);
+        int npages = 0;
         for (int i = 0; i < 25 && n < max; i++) {
             uint32_t bp = rb->bm_pages[i];
             if (!bp) break;
+            npages++;
             if (bp >= nblocks) {
                 add_problem(out, &n, max, AFS_PROBLEM_RANGE, bp,
                             "bitmap block pointer %u outside volume", bp);
                 continue;
             }
+            /* A bitmap page is storage, like any other block, so it belongs in
+             * the same "referenced once" set the tree walk uses. Without this
+             * the double-use check could not see it: the real g1a30c.adf has
+             * block 948 as bitmap page 2 AND as a file in the tree, so writing
+             * either would silently corrupt the other. */
+            if (vc.marks[bp]) {
+                add_problem(out, &n, max, AFS_PROBLEM_DOUBLE_USE, bp,
+                            "block %u is both bitmap page %d and a directory "
+                            "entry", bp, i + 1);
+                continue;
+            }
+            vc.marks[bp] = 1;
             uint8_t *bm = malloc(bs);
             if (!bm) break;
             if (afs_volume_read_block(v, bp, bm, bs) != 0) { free(bm); continue; }
@@ -211,6 +225,20 @@ int afs_verify_memory(const uint8_t *img, size_t size, size_t bsize,
                 add_problem(out, &n, max, AFS_PROBLEM_CHECKSUM, bp,
                             "bitmap block %u checksum invalid", bp);
             free(bm);
+        }
+        /* The page list is terminated by a zero entry, so its length is the
+         * volume's own size in pages: one bit per block, 32 bits per long,
+         * and (block_size/4) longs per page. More pages than that means extra
+         * blocks are being claimed as allocation map that do not need to be. */
+        {
+            size_t longs_needed = ((size_t)nblocks + 31) / 32;
+            size_t longs_per_page = bs / 4;
+            size_t want = longs_per_page ? (longs_needed + longs_per_page - 1)
+                                              / longs_per_page : 0;
+            if (npages != (int)want)
+                add_problem(out, &n, max, AFS_PROBLEM_BITMAP_MISMATCH, 0,
+                            "bitmap block count %d, but a %u-block volume "
+                            "needs %zu", npages, nblocks, want);
         }
     }
 
