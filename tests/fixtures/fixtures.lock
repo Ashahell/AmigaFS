@@ -1,0 +1,148 @@
+# amigafs — fixture and oracle lock file (M0)
+#
+# Ground truth, measured 2026-10-13 against the pinned oracles. Every sha256 below
+# was computed locally from the bytes we actually fetched; every DOS type was read
+# from the bootblock (raw 4 bytes) and cross-checked against amitools.
+#
+# These images are downloaded at test time and NEVER committed (they are gitignored).
+# ADFlib ships no separate licence for tests/data; see LICENSE.
+
+# ---------------------------------------------------------------- oracles -----
+
+[oracle.adflib]
+name        = ADFlib
+url         = https://github.com/adflib/ADFlib
+commit      = 73880de78bf472a1cc7d60f07fc217e02d571268   # tag v0.10.7
+library_lic = LGPL-2.1
+cli_lic     = GPL-2.0-or-later
+# ADFlib's adfVolIsFsValid() is a LABEL/OVERWRITE guard only, not a mount rule:
+# its two callers are src/adf_dev.c:529 (prints "???" when false) and
+# examples/adfformat.c:134 (guard before overwrite). ADFlib still READS DOS\2.
+# Consequence: ignore ADFlib's filesystem-type *string* for DOS\2/DOS\4; compare
+# listings and content only.
+
+[oracle.amitools]
+name    = amitools
+url     = https://github.com/cnvogelg/amitools
+version = 0.8.1
+lic     = GPL-3.0
+# Models DOS\0-DOS\7 with clean names ("DOS2:ofs+intl"). Preferred oracle wherever
+# ADFlib labels a type "???" (i.e. DOS\2, DOS\4) and for all RDB work (rdbtool).
+# Limitation: xdftool list chokes on a standalone DIRC floppy's dir-cache blocks;
+# use ADFlib adfls for those.
+
+# ------------------------------------------------------------- source url -----
+
+[source.adflib-dumps]
+url = https://github.com/adflib/ADFlib/raw/73880de78bf472a1cc7d60f07fc217e02d571268/tests/data/Dumps
+
+# -------------------------------------------------------------- fixtures ------
+# fields: name | bytes | sha256 | bootblock-first-4-bytes | dos_type | role
+
+[name = testofs.adf]
+size = 901120
+sha256 = b4a533173655f55785b3de2303b94893d79e970138a7755eb334d1a87746aa46
+blk0  = 444f5302
+dostype = DOS\2            ; OFS + INTL.  ADFlib prints "???"; amitools: DOS2:ofs+intl
+role  = positive           ; exercises OFS read + INTL hash fold
+
+[name = testffs.adf]
+size = 901120
+sha256 = f0213c4460d98dd6fe0eef228887bb659cf0bac86bc6180d8c4e5dbc8da868f2
+blk0  = 444f5305
+dostype = DOS\5            ; FFS + DirCache&INTL
+role  = positive           ; DIRC. adfls lists it; xdftool list cannot read its dircache
+
+[name = testhd.adf]
+size = 1802240
+sha256 = 591a678b10a1167bc8d81434071fd9c8bd21ef0bf051a0b8c7d466074a88b7c3
+blk0  = 444f5305
+dostype = DOS\5            ; FFS + DirCache, HD (1760K) geometry
+role  = positive           ; HD floppy geometry + DIRC
+
+[name = links.adf]
+size = 901120
+sha256 = 65408e85b2f3b7381a58bf8e12b5b08f766d1239481a34bc80a795913942d4f4
+blk0  = 444f5301
+dostype = DOS\1            ; plain FFS
+role  = positive           ; hardlinks + softlinks (to files and dirs)
+
+[name = test_link_chains.adf]
+size = 901120
+sha256 = b6a90fd33897401c233d4f004af7a8c9d56357abdb9b49b7abd7b071c6e0448a
+blk0  = 444f5301
+dostype = DOS\1            ; plain FFS
+role  = positive           ; links to links
+
+[name = arccsh.adf]
+size = 901120
+sha256 = 5a9ae4b4bb42dc4ecd3c4817b5234927f569bfbcb0c2518d7776454dff7372ed
+blk0  = 444f5300
+dostype = DOS\0            ; plain OFS
+role  = positive           ; real-world OFS disk with tools
+
+[name = win32-names.adf]
+size = 901120
+sha256 = 059dbe30a2867b9f56693055681d6305e2365bcb1d3d3cd1b21792ee638d468d
+blk0  = 444f5305
+dostype = DOS\5
+role  = positive           ; filenames illegal on Windows; Latin-1 name handling
+
+[name = blank.adf]
+size = 901120
+sha256 = 79af32f00e00623ce73da9816db3168bfe47a1d7c4e2ceb3de0fe618315f4374
+blk0  = 444f5300
+dostype = DOS\0            ; plain OFS
+role  = positive           ; formatted but empty; empty-dir and empty-file cases
+
+[name = g1a30c.adf]
+size = 901120
+sha256 = 24c47e0fe50c28ebe4889076fcef379c20e217b3bb4db1b9be1bc1f3f8f07d8d
+blk0  = 444f5300
+dostype = DOS\0            ; plain OFS
+role  = positive-regression ; ADFlib issue #63 (bitmap read crash)
+
+# ------------------------------------------------------------- negative -------
+
+[name = cache_crash.adf]
+size = 901120
+sha256 = 491eae68fb763cce6a6063919450f618469055710341dd700653a5a2167c0bca
+blk0  = 444f5306
+dostype = DOS\6            ; unsupported (long-name type); also invalid under the FAQ
+role  = negative           ; PASS = refuse with named reason, no crash, no partial mount.
+                           ; Has a corrupt bitmap (ADFlib fails: "invalid checksum
+                           ; 0x93aab9c6 != 0x94aab8c6", block 881). Debian bug 862740.
+                           ; Secondary point: exercise the DOS\6 refusal path itself.
+
+[name = ffdisk0049.adf]
+size = 901120
+sha256 = a92ddfb7d6131a9f19803cf60c4a2229f062549f855ee8572d91532369a00a1a
+gz    = true              ; decompressed sha
+blk0  = 444f5300
+dostype = DOS\0            ; plain OFS
+role  = hostile            ; real-world Fred Fish disk #49: deliberately invalid root
+                           ; block value + dirty-but-rebuildable bitmap. afsverify must
+                           ; flag the same problem class as `adfbitmap`.
+
+# ------------------------------------------------------------------ RDB --------
+# The 6-partition A590 image covers EVERY supported DOS type, one partition each.
+# Measured with amitools rdbtool (block offsets are partition-relative byte offsets
+# in the .hdd; block numbers below are amitools-reported first-block).
+
+[name = a590_WD93028XA_6parts.hdd]
+size = 21620736
+sha256 = 42d7fb5d2cb5677e3c5426fe4eb58e38c75e92934af6f9902639b1c03695a801
+gz    = true              ; upstream ships .gz; lock records the DECOMPRESSED sha
+role  = rdb               ; 6 partitions, one per DOS type:
+  ;   #0 'OFS'          DOS0  0x444f5300
+  ;   #1 'OFS INTL'     DOS2  0x444f5302
+  ;   #2 'OFS DirCache' DOS4  0x444f5304
+  ;   #3 'FFS'          DOS1  0x444f5301
+  ;   #4 'FFS INTL'     DOS3  0x444f5303
+  ;   #5 'FFS DirCache' DOS5  0x444f5305
+
+[name = a590_WD93028XA_6parts_not_formatted.hdd]
+size = 21620736
+sha256 = c19d912287acf566dbe27c251a1db083b4e7778376e113a29e867b3c2400ae5e
+gz    = true              ; decompressed sha
+role  = negative          ; same RDB, partitions unformatted. Mount must refuse cleanly.

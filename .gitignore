@@ -1,0 +1,19 @@
+# Test fixture images: downloaded at test time by fetch_fixtures.sh, verified by
+# sha256 against fixtures.lock. Never committed, never redistributed (ADFlib ships
+# no separate licence for tests/data). See LICENSE.
+tests/fixtures/*.adf
+tests/fixtures/*.hdd
+tests/fixtures/*.gz
+
+# Oracle build trees (out of tree by design — D2)
+/adflib-oracle/
+
+# build
+build/
+*.o
+*.so
+*.a
+
+# editor/OS noise
+*.swp
+.DS_Store
