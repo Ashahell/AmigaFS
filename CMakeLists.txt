@@ -23,6 +23,8 @@ add_library(amigafs_core STATIC
   src/lib/dir.c
   src/lib/file.c
   src/lib/links.c
+  src/lib/bitmap.c
+  src/lib/verify.c
 
 )
 target_include_directories(amigafs_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -40,6 +42,7 @@ set(AMIGAFS_UNIT_TESTS
   test_dir
   test_file
   test_links
+  test_verify
 
 
 )
@@ -60,3 +63,5 @@ add_executable(m4_cat tests/oracle/m4_cat.c)
 target_link_libraries(m4_cat PRIVATE amigafs_core)
 add_executable(m5_links tests/oracle/m5_links.c)
 target_link_libraries(m5_links PRIVATE amigafs_core)
+add_executable(m6_verify tests/oracle/m6_verify.c)
+target_link_libraries(m6_verify PRIVATE amigafs_core)
