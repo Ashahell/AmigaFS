@@ -18,6 +18,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 FIX="$ROOT/tests/fixtures"
 DRV="$ROOT/build/amigafs-fuse"
 LS3="$ROOT/build/m3_ls"
+AFS="$ROOT/build/afs"
 MNT="${TMPDIR:-/tmp}/amigafs_m8_mnt"
 ADFLIB_BIN="${ADFLIB_BIN:-$HOME/Work/adflib-oracle/ADFlib/build/examples}"
 export PATH="$ADFLIB_BIN:$PATH"
@@ -52,14 +53,69 @@ mount_and_check() {
         cleanup; return
     fi
 
-    # 2. entry count matches the core library's own listing
+    # 2. entry count matches the core library's own listing.
+    #    `.amigafs` is synthetic (decision D4) and is counted SEPARATELY: it is
+    #    not a disk entry, so it must be excluded from the comparison -- but it
+    #    must be PRESENT and correctly sized, so that excluding it cannot
+    #    quietly hide a mount that stopped providing it.
     local fuse_n core_n
-    fuse_n=$(ls -A "$MNT" 2>/dev/null | wc -l | tr -d ' ')
+    fuse_n=$(ls -A "$MNT" 2>/dev/null | grep -a -v '^\.amigafs$' | wc -l | tr -d ' ')
     core_n=$("$LS3" "$img" 0 2>/dev/null | grep -c .)
     if [[ "$fuse_n" == "$core_n" ]]; then
         ok "$(printf '%-22s mounts, %s root entries match the core listing' "$name" "$fuse_n")"
     else
         bad "$name: mount shows $fuse_n entries, core library says $core_n"
+    fi
+
+    local bmp bmpsz want_bmp
+    bmp="$MNT/.amigafs/bitmap"
+    if [[ -f "$bmp" ]]; then
+        bmpsz=$(stat -c%s "$bmp" 2>/dev/null || echo 0)
+        want_bmp=$(( ($(stat -c%s "$img") / 512 + 7) / 8 ))
+        if [[ "$bmpsz" == "$want_bmp" ]]; then
+            ok "$(printf '%-22s .amigafs/bitmap present, %s bytes' "$name" "$bmpsz")"
+        else
+            bad "$name: .amigafs/bitmap is $bmpsz bytes, expected $want_bmp"
+        fi
+    else
+        bad "$name: .amigafs/bitmap missing"
+    fi
+
+    # 2b. ORACLE: the bitmap, against BOTH oracles.
+    #     We report the bitmap over EVERY block of the volume. Both ADFlib and
+    #     amitools report a scope two blocks smaller -- their totals are always
+    #     (blocks - 2) -- and which two they omit is not derivable from their
+    #     output: it is not the two reserved blocks at the low end (on
+    #     arccsh.adf blocks 0 and 1 carry USED bits, yet the two they omit are
+    #     free ones), and amitools contradicts itself, with `bitmap info`
+    #     reporting 1758 while its own `bitmap all` dump walks 0..1759.
+    #     So the relationship is asserted at the level that IS invariant and
+    #     still catches a wrong bitmap: our total exceeds each oracle's by
+    #     exactly 2, and our used count is either the oracle's or 2 more, with
+    #     free taking the remainder. A bitmap off by even one block in either
+    #     direction breaks this.
+    local o_used o_free
+    o_used=$("$AFS" bitmap "$img" 2>/dev/null | sed -n 's/^used: *//p')
+    o_free=$("$AFS" bitmap "$img" 2>/dev/null | sed -n 's/^free: *//p')
+    if [[ -n "$o_used" && -n "$o_free" ]]; then
+        local img_blocks d_used d_free
+        img_blocks=$(( $(stat -c%s "$img") / 512 ))
+        if [[ $((o_used + o_free)) -ne $img_blocks ]]; then
+            bad "$name: bitmap counts $((o_used + o_free)) blocks, image has $img_blocks"
+        fi
+        local ou of
+        ou=$(adfbitmap show "$img" 2>/dev/null | tr -d '\r' | sed -n 's/.*Blocks used[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -1)
+        of=$(adfbitmap show "$img" 2>/dev/null | tr -d '\r' | sed -n 's/.*free[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -1)
+        if [[ -n "$ou" && -n "$of" ]]; then
+            local du df
+            du=$((o_used - ou)); df=$((o_free - of))
+            if [[ $((du + df)) -eq 2 && ( $du -eq 0 || $du -eq 2 ) ]]; then
+                ok "$(printf '%-22s bitmap: ADFlib %s used/%s free, ours +%s/+%s (total scope)' \
+                       "$name" "$ou" "$of" "$du" "$df")"
+            else
+                bad "$name: bitmap vs ADFlib: ours $o_used/$o_free, ADFlib $ou/$of (expected a total difference of exactly 2)"
+            fi
+        fi
     fi
 
     # 3. every file readable through the mount matches unadf, byte for byte

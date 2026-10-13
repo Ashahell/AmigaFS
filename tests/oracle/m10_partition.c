@@ -23,6 +23,7 @@
 #include "amigafs/be.h"
 #include "amigafs/rdb.h"
 #include "amigafs/volume.h"
+#include "amigafs/verify.h"
 
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: m10_partition <rdb-image>\n"); return 2; }
@@ -88,6 +89,33 @@ int main(int argc, char **argv) {
             printf("  FAIL partition %u bootblock DOS type 0x%02x, RDB says 0x%02x\n",
                    i, ondisk, want);
             bad++;
+        }
+
+        /* Verify the partition. This is the strong alignment proof: every
+         * AmigaDOS block carries a checksum computed over its OWN bytes at a
+         * fixed offset, so a window off by even one block makes the checksum
+         * of the block we read as the rootblock disagree with its content --
+         * which is exactly how a mis-windowed partition announces itself. A
+         * clean verify over a whole partition means every block we addressed
+         * was the block the filesystem meant. */
+        {
+            size_t off = (size_t)p->start_block * 512;
+            size_t len = (size_t)got_size * 512;
+            afs_verify_report_t rep[32];
+            int nv;
+            if (off + len > (size_t)sz) {
+                printf("  FAIL partition %u window [%zu,%zu) past the image\n",
+                       i, off, off + len);
+                bad++;
+            } else {
+                nv = afs_verify_memory(img + off, len, 512, rep, 32);
+                if (nv != 0) {
+                    printf("  FAIL partition %u: %d structural problem(s); "
+                           "first: block %u %s\n",
+                           i, nv, rep[0].block, rep[0].detail);
+                    bad++;
+                }
+            }
         }
         afs_volume_close(v);
         opened++;

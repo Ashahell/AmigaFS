@@ -26,6 +26,42 @@ ls -la /mnt/africa
 fusermount3 -u /mnt/africa
 ```
 
+An **RDB-partitioned hard-disk image** mounts its partitions as directories
+named after their RDB `DriveName`, so `/mnt/africa/Workbench/Startup` is a file
+inside partition `Workbench`:
+
+```sh
+./build/amigafs-fuse hardfile.hdd /mnt/africa
+ls /mnt/africa                 # one directory per partition
+ls /mnt/africa/Workbench
+```
+
+A floppy mounts its root directly, and each partition of an RDB image mounts
+its own root. Inside a partition every block pointer is partition-relative,
+which is why each is opened as a window of its **own** length rather than "to
+the end of the image" — an over-long window puts the computed rootblock in the
+middle of the next partition, leaving only the last partition mountable.
+
+### The block bitmap
+
+Every volume's root carries a synthetic `.amigafs/` directory holding that
+volume's raw block bitmap:
+
+```sh
+ls -l /mnt/africa/.amigafs/bitmap    # 220 bytes for a 1760-block floppy
+```
+
+One bit per block, most significant bit first, `1 = free`. It is a real
+read-only file with real bytes, so `cmp` against a dump is a real comparison.
+
+We report the bitmap over **every** block of the volume. Both ADFlib and
+amitools report a scope two blocks smaller — their totals are always
+`blocks − 2` — and neither says which two they omit (it is not the two
+reserved blocks at the low end: on `arccsh.adf` those carry *used* bits, yet
+the two omitted are free ones). The gate asserts the relationship that *is*
+invariant — a total difference of exactly 2, with used and free taking the
+remainder — rather than guessing at the rest.
+
 ### Mount options
 
 | Option | Default | Meaning |
