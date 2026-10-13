@@ -1,6 +1,6 @@
 # Implementation Plan — `amigafs`: AmigaDOS File System for Linux via FUSE3
 
-**Status:** rev 3 — all eight owner decisions resolved 2026-10-13. **Approved to implement.** No code written yet.
+**Status:** rev 4 — M0 complete and gated; C1 confirmed against live fixtures. Eight owner decisions resolved 2026-10-13. **Approved to implement.**
 **Target:** `/home/miller/Work/projects/amigafs` (new standalone project; not yet a git repository)
 **Date:** 2026-10-13
 
@@ -60,7 +60,12 @@ Section numbers refer to ADF FAQ v1.14.
 5. **Hash:** `h = len (max 30); for each c: h = (h*13 + capitalch(c, flags)) & 0x7FF; return h % (BSIZE/4 - 56)`. `capitalch` folds `a`–`z`, and for INTL also 224–254 except 247 (`extstrings.c:7-14`).
 6. **File data:** the header's `data_blocks[]` (`BSIZE/4 - 56` entries, 72 at 512 B) is filled from the **end** backwards, with `high_seq` valid entries. Extension blocks (`T_LIST`, `ST_FILE`) continue the same reversed table. An OFS data block has a 24-byte header (`type`, `header_key`, `seq_num`, `data_size`, `next_data`, checksum) and `BSIZE-24` bytes of payload. An FFS data block is raw `BSIZE` bytes. Truncate to `byte_size`.
 7. **Block size:** `BSIZE = SizeBlock*4 * SectorsPerBlock` from the partition's DosEnvec, and 512 on floppies. Every table size derives from `BSIZE`; nothing is hardcoded as 72.
-8. **Rootblock:** `INT((Reserved + highKey)/2)` (C8). Validate type and secondary type. The bitmap-valid flag and the bitmap pointers (25 in the root plus an extension chain) come from the root.
+8. **Rootblock:** `INT((Reserved + highKey)/2)` (C8) — the FAQ/AROS formula, where `highKey = numCyls*numSurfaces*numBlocksPerTrack - 1`. We use **one** formula for every medium. Three rules make it safe:
+   - Validate the block is `T_HEADER`/`ST_ROOT` before trusting it.
+   - Cross-check the bootblock's root field **when it is non-zero** and warn on a mismatch. (Many ADFlib images leave it 0 and rely on the computed value, e.g. `testffs.adf`.)
+   - Any other oracle-vs-formula difference is an **oracle limitation to record**, not a reason to change the formula.
+
+   **Why not ADFlib's:** ADFlib has *no single formula* — floppies take it from the bootblock root field (`src/adf_dev_flop.c:88`), hardfiles use `sizeBlocks/2` (`src/adf_dev_hdfile.c:120`), and `adfVolCalcRootBlk` is `(last-first+1)/2` which ignores `Reserved`. Our formula agrees with ADFlib when `Reserved = 2` and the block count is even, which covers DD (880) and HD (1760).
 9. **Secondary types:** `ST_ROOT 1`, `ST_USERDIR 2`, `ST_SOFTLINK 3`, `ST_LINKDIR 4`, `ST_FILE -3`, `ST_LINKFILE -4`. Any other value is a verifier error and a `EIO` on access.
 10. **Dates:** days since 1978-01-01, minutes, and ticks (1/50 s). Amiga clocks are local time with no zone stored; see §6 D6.
 11. **Names:** Latin-1, at most 30 bytes (C9). Comments are at most 79 bytes, exposed as the xattr `user.amiga.comment`.
@@ -108,11 +113,30 @@ amigafs/
 
 ## 4. Milestones (each gated independently)
 
-### M0 — Environment and oracle
-- `git init`. Licence decision recorded (§1).
-- Build ADFlib's CLI from a pinned commit, out of tree, under `~/Work/adflib-oracle/`. Record the commit sha. This is not a dependency of our build.
-- `tests/fixtures/fixtures.lock`: every image from `tests/data/Dumps/` (C13) with sha256, plus `adfformat -t 0..5` images for each DOS type on both DD and HD. A fetch script verifies each sha and refuses on mismatch.
-- **Gate:** the oracle runs `adfls` on `testffs.adf`; every fixture's sha matches.
+### M0 — Environment and oracle ✅ COMPLETE (commit `027048d`)
+- `git init`; MIT `LICENSE` added (D8).
+- ADFlib CLI built **out of tree** at `~/Work/adflib-oracle/ADFlib`, pinned to **`73880de78bf472a1cc7d60f07fc217e02d571268` (v0.10.7)**, 0 compile errors, all six tools built. Not a dependency of our build.
+- **Second oracle: amitools `0.8.1`** (`xdftool`, `rdbtool`, `vamos`), pinned.
+- `tests/fixtures/fixtures.lock`: 13 fixtures, each sha256 **measured from the bytes actually fetched**, plus its **measured bootblock DOS type**. Images are gitignored, downloaded at test time, never redistributed.
+- `fetch_fixtures.sh`: sha256-verified fetch. Proven **idempotent** (0 refetches on rerun) and **load-bearing** (one flipped byte is caught, exit 1).
+- `tests/oracle/m0_gate.sh`: **PASS**, 13 checks.
+- **Measured fixture census** (this is the ground truth M0 established):
+
+| Fixture | DOS type | Character |
+|---|---|---|
+| `arccsh.adf`, `g1a30c.adf`, `blank.adf`, `ffdisk0049.adf` | `DOS\0` | plain OFS |
+| `links.adf`, `test_link_chains.adf` | `DOS\1` | plain FFS, links |
+| **`testofs.adf`** | **`DOS\2`** | **OFS + INTL** |
+| **`testffs.adf`**, `testhd.adf`, `win32-names.adf` | **`DOS\5`** | **FFS + DirCache&INTL** |
+| `cache_crash.adf` | `DOS\6` | negative: corrupt bitmap + unsupported type |
+| `a590_WD93028XA_6parts.hdd` | RDB | **one partition per `DOS\0`–`DOS\5`** |
+
+- **Consequences, all now load-bearing:**
+  - **C1 is confirmed by the corpus.** `testofs.adf` really is `DOS\2`, i.e. exactly the OFS/INTL case AROS misreads (it tests `dosflags == 0`). C5's downgrade of AROS to reference-only is justified by a real fixture.
+  - **C4 is load-bearing from day one:** `DOS\5` (DIRC) is 3 of 11 floppy images, so "the hash table is the authority and a stale dir cache must not hide files" is a core requirement, not a refinement.
+  - **Oracle complementarity is now mapped.** ADFlib lists DIRC floppies correctly but *labels* `DOS\2`/`DOS\4` as `???`; amitools reads and labels `DOS\0`–`DOS\7` but its `xdftool list` cannot read a standalone DIRC floppy's dir-cache blocks. Each covers the other's gap.
+  - **`cache_crash.adf` is a negative fixture.** Pass = refuse with a named reason (`DOS\6 unsupported`), no crash, no partial mount. It also exercises the `DOS\6` refusal path itself.
+  - The RDB image gives **full variant coverage in one mount** (M7).
 
 ### M1 — Foundations
 - `be32`/`be16`/`bstr`; normal and bootblock checksums; `hash` with `capitalch`; Latin-1 ↔ UTF-8 conversion; `blockio` with a partition window and a bounded LRU cache.
@@ -124,8 +148,9 @@ amigafs/
 
 ### M2 — Volume open and variant detection
 - DOS type on block 0 or block 1; flags; refuse anything outside `DOS\0`–`\5` with a named reason.
-- Rootblock by formula, validated. Parse and validate the header, extension, bitmap and dir-cache block types.
-- **Gate:** every fixture reports the variant and rootblock that `adfinfo` reports. The unformatted A590 image is refused cleanly.
+- Rootblock by formula, validated (see §2.8 for the three cross-check rules).
+- Parse and validate the header, extension, bitmap and dir-cache block types.
+- **Gate:** every fixture reports **exactly** the DOS type recorded in `fixtures.lock` — `DOS\0`×4, `DOS\1`×2, **`DOS\2`×1**, **`DOS\5`×3** — and the rootblock that `adfinfo` reports. `cache_crash.adf` (`DOS\6`) is **refused** with a named reason; the unformatted A590 image is refused cleanly.
 
 ### M3 — Directories
 - Lookup: hash, then bucket, then follow `hash_chain`, comparing with `capitalch` on Latin-1. Listing: the whole table plus chains. A cycle guard bounds the chain length by the block count.
@@ -163,11 +188,12 @@ amigafs/
 
 ## 5. Testing strategy
 
-- **Oracle 1:** ADFlib CLI at a pinned commit (`adfls`, `adfinfo`, `unadf`, `adfbitmap`). It is the reference for listings, metadata, content and bitmap.
-- **Oracle 2:** unit golden vectors (checksums, hash and INTL fold, Latin-1, protection bits, dates, softlink paths).
+- **Oracle 1:** ADFlib CLI at pinned commit `73880de7` (`adfls`, `adfinfo`, `unadf`, `adfbitmap`). Reference for listings, metadata, content and bitmap. **Compare listings and content only** — its filesystem-type *string* is `???` for `DOS\2`/`DOS\4` because `adfVolIsFsValid()` is a label/overwrite guard (`src/adf_dev.c:529`, `examples/adfformat.c:134`), not a mount rule. Record that display gap in the oracle script.
+- **Oracle 2:** **amitools `0.8.1`** (`xdftool`, `rdbtool`). Preferred oracle wherever ADFlib labels a type `???` (i.e. `DOS\2`, `DOS\4`) and for **all RDB work**. Use it when the two oracles disagree. Record any disagreement; **never auto-accept** it.
+- **Oracle 3:** unit golden vectors (checksums, hash and INTL fold, Latin-1, protection bits, dates, softlink paths).
 - **Cross-check, not an oracle:** AROS `afs`, for checksum, hash and `capitalch` only (C5).
-- **Rule:** every read path must match the oracle on every fixture before it counts as done. Where the oracle is known to be weak (RDB), a disagreement is a recorded finding, not a pass.
-- **Fixtures:** pinned by sha256. ADFlib's test data has no separate licence. Download it at test time and never commit or ship it. The `adfformat`-generated images are ours.
+- **Rule:** every read path must match the oracle on every fixture before it counts as done. Where an oracle is known to be weak (ADFlib RDB is experimental upstream), a disagreement is a **recorded finding**, not a pass.
+- **Fixtures:** pinned by sha256 in `fixtures.lock`, with measured DOS types. ADFlib's test data carries no separate licence: downloaded at test time, never committed or shipped. The `adfformat`-generated images are ours.
 
 ---
 
