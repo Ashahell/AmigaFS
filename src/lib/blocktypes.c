@@ -66,6 +66,9 @@ int afs_parse_fileheader(const uint8_t *blk, size_t bsize, afs_fileheader_t *out
     out->gid        = be16(blk + bsize - 194);
     out->protect    = be32(blk + bsize - 192);
     out->byte_size  = be32(blk + bsize - 188);
+    out->days       = be32(blk + bsize - 92);
+    out->mins       = be32(blk + bsize - 88);
+    out->ticks      = be32(blk + bsize - 84);
     out->hash_chain = be32(blk + bsize - 16);
     out->parent     = be32(blk + bsize - 12);
     out->extension  = be32(blk + bsize - 8);

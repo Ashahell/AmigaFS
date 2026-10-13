@@ -40,6 +40,11 @@ int afs_link_resolve_file(afs_volume_t *v, uint32_t dirblock,
 int afs_file_nlink(afs_volume_t *v, uint32_t dirblock,
                    const char *name, size_t namelen, unsigned *out);
 
+/* Pure translator: turn an Amiga softlink target string into a mount-relative
+ * POSIX path. `depth` is how many directories deep the link sits (0 = root);
+ * a relative multi-component target gains one "../" per level. */
+int afs_softlink_translate(const char *raw, unsigned depth, char *out, size_t cap);
+
 /* Read a soft link's target and translate it to a POSIX-relative path written
  * into `out`. Returns 0 on success. */
 int afs_softlink_target(afs_volume_t *v, uint32_t dirblock,

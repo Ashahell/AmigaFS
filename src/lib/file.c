@@ -205,3 +205,13 @@ int afs_file_read_all(afs_volume_t *v, uint32_t dirblock,
     if (out_len) *out_len = got;
     return 0;
 }
+/* Read by header block (the FUSE path): resolve a hard link first, then read. */
+int afs_read_file_by_block(afs_volume_t *v, uint32_t fileblock,
+                           void *out, size_t len, uint64_t offset, size_t *got) {
+    if (!v || !out || !got) return -1;
+    uint32_t fblk;
+    uint8_t kind;
+    if (resolve_file_block(v, fileblock, &fblk, &kind) != 0) return -1;
+    if (len == 0) { *got = 0; return 0; }
+    return read_into(v, fblk, (uint8_t *)out, offset, len, got);
+}

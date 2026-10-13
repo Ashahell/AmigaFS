@@ -69,6 +69,46 @@ int afs_file_nlink(afs_volume_t *v, uint32_t dirblock,
     return 0;
 }
 
+/* Translate an Amiga softlink path into a POSIX-relative target, given the
+ * depth of the directory holding the link (0 = the volume root). This is the
+ * pure form, exposed for the FUSE layer which already knows the link's depth
+ * (or, more simply, emits a root-relative target). */
+int afs_softlink_translate(const char *raw, unsigned depth, char *out, size_t cap) {
+    if (!raw || !out || cap == 0) return -1;
+    /* strip a leading Amiga volume prefix: "Vol:" or ":" */
+    const char *t = raw;
+    const char *colon = strchr(raw, ':');
+    if (colon) {
+        const char *slash = strchr(raw, '/');
+        if (!slash || colon < slash) {
+            t = colon + 1;
+            if (*t == '/') t++;
+        }
+    }
+    const char *body = t;
+    int absolute = 0;
+    while (*body == '/') { absolute = 1; body++; }
+
+    size_t o = 0;
+    out[0] = '\0';
+    if (absolute) {
+        /* the MOUNT ROOT is the volume root, so an absolute Amiga path is
+         * already the correct mount-relative POSIX path */
+        snprintf(out, cap, "%s", body);
+        return 0;
+    }
+    if (strchr(body, '/')) {
+        for (unsigned i = 0; i < depth && o + 3 < cap; i++) {
+            memcpy(out + o, "../", 3);
+            o += 3;
+        }
+        snprintf(out + o, cap - o, "%s", body);
+    } else {
+        snprintf(out, cap, "%s", body);
+    }
+    return 0;
+}
+
 /* Translate an Amiga softlink path into a POSIX-relative target.
  *
  * Amiga rules: `Vol:` and a lone `:` mean the volume root; `/x` is from the
@@ -138,31 +178,5 @@ int afs_softlink_target(afs_volume_t *v, uint32_t dirblock,
         }
     }
 
-    /* build the result */
-    char rel[1024];
-    size_t o = 0;
-    rel[0] = '\0';
-
-    const char *body = t;
-    int absolute = 0;
-    while (*body == '/') { absolute = 1; body++; }   /* '/x' and '//x' both root */
-
-    if (absolute) {
-        /* from the mount root: no ../ prefix */
-        o = (size_t)snprintf(rel, sizeof rel, "%s", body);
-    } else if (strchr(body, '/') != NULL) {
-        /* a relative path with slashes: prefix with ../ per level of depth */
-        for (unsigned i = 0; i < depth; i++) {
-            int n = snprintf(rel + o, sizeof rel - o, "../");
-            if (n < 0 || (size_t)n >= sizeof rel - o) break;
-            o += (size_t)n;
-        }
-        snprintf(rel + o, sizeof rel - o, "%s", body);
-    } else {
-        /* a bare relative name: same directory, emit as-is */
-        snprintf(rel, sizeof rel, "%s", body);
-    }
-
-    snprintf(out, cap, "%s", rel);
-    return 0;
+    return afs_softlink_translate(raw, depth, out, cap);
 }

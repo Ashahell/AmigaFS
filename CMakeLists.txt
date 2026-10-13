@@ -26,6 +26,7 @@ add_library(amigafs_core STATIC
   src/lib/bitmap.c
   src/lib/verify.c
   src/lib/rdb.c
+  src/lib/translate.c
 
 )
 target_include_directories(amigafs_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -45,6 +46,7 @@ set(AMIGAFS_UNIT_TESTS
   test_links
   test_verify
   test_rdb
+  test_translate
 
 
 )
@@ -69,3 +71,13 @@ add_executable(m6_verify tests/oracle/m6_verify.c)
 target_link_libraries(m6_verify PRIVATE amigafs_core)
 add_executable(m7_rdb tests/oracle/m7_rdb.c)
 target_link_libraries(m7_rdb PRIVATE amigafs_core)
+
+# --------------------------------------------------------------- FUSE mount ----
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FUSE3 REQUIRED fuse3)
+add_executable(amigafs-fuse src/fuse/main.c)
+target_link_libraries(amigafs-fuse PRIVATE amigafs_core)
+target_compile_options(amigafs-fuse PRIVATE -DFUSE_USE_VERSION=31 ${FUSE3_CFLAGS_OTHER})
+target_include_directories(amigafs-fuse PRIVATE ${FUSE3_INCLUDE_DIRS})
+target_link_directories(amigafs-fuse PRIVATE ${FUSE3_LIBRARY_DIRS})
+target_link_libraries(amigafs-fuse PRIVATE ${FUSE3_LIBRARIES})

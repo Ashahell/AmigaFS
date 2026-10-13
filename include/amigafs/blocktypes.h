@@ -77,6 +77,7 @@ typedef struct {
     uint16_t gid;           /* 16-bit (C2) */
     uint32_t protect;
     uint32_t byte_size;
+    uint32_t days, mins, ticks;      /* Amiga timestamp fields (BSIZE-92/-88/-84) */
     uint32_t hash_chain;
     uint32_t parent;
     uint32_t extension;     /* file-extension chain, or dir-cache chain */

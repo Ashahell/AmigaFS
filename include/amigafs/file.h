@@ -48,4 +48,12 @@ int afs_file_read_all(afs_volume_t *v, uint32_t dirblock,
                        const char *name, size_t namelen,
                        void **out, size_t *out_len);
 
+/* Read from a file given its HEADER BLOCK directly (no name lookup). This is
+ * what the FUSE read path needs, because FUSE hands us an inode (block
+ * number), not a path. `fileblock` may be a plain file header or a hard link
+ * (resolved via real_entry). Reads past EOF are clamped; *got receives the
+ * byte count. */
+int afs_read_file_by_block(afs_volume_t *v, uint32_t fileblock,
+                           void *out, size_t len, uint64_t offset, size_t *got);
+
 #endif /* AMIGAFS_FILE_H */
