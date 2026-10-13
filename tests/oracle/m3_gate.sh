@@ -27,7 +27,9 @@ for f in "$FIX"/*.adf; do
     # negative fixture: we refuse it, so skip the oracle comparison
     if [[ "$name" == "cache_crash.adf" ]]; then continue; fi
 
-    "$OURS" "$f" 1 2>/dev/null | sort > /tmp/m3_ours.$$
+    # Compare ROOT ONLY: adfls lists just the root directory, so depth 0 on
+    # our side. (Depth>0 would recurse and legitimately show more.)
+    "$OURS" "$f" 0 2>/dev/null | sort > /tmp/m3_ours.$$
     # adfls prints bare names at the root, one per line
     adfls "$f" 2>/dev/null | sed 's#^#/#' | sort > /tmp/m3_adflib.$$
 

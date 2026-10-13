@@ -97,6 +97,16 @@ static afs_volume_t *synth_open(synth_t *s) {
     return v;
 }
 
+
+/* Point a hash-table bucket in an ARBITRARY directory block (not just root). */
+static void synth_block_link(synth_t *s, uint32_t dirblk, const char *name,
+                             uint32_t bno, uint32_t tsz) {
+    uint8_t *d = s->img + dirblk * BS;
+    uint32_t bucket = afs_hash(name, strlen(name), tsz, s->flags);
+    put_be32(d + 24 + 4 * bucket, bno);
+    put_be32(d + 20, afs_block_checksum(d, BS, 20));
+}
+
 /* --- listing --- */
 static void test_list_directory(void) {
     synth_t s;
@@ -296,6 +306,66 @@ static void test_listing_ignores_dircache(void) {
     afs_volume_close(v);
 }
 
+/* A subdirectory must be listable. Directory blocks do NOT store ht_size --
+ * offset 12 is unused there -- so the table size must be derived from the
+ * block size. Reading the stored field yields 0 and an empty directory. */
+static void test_subdirectory_listing(void) {
+    synth_t s;
+    synth_init(&s, 0x01);
+    uint32_t next = SYNTH_FIRST_ENTRY;
+
+    /* build a subdirectory with two entries of its own */
+    uint32_t sub = SYNTH_ROOT + 5;
+    uint8_t *sd = s.img + sub * BS;
+    put_be32(sd + 0, AFS_T_HEADER);
+    put_be32(sd + 8, 0);
+    put_be32(sd + 12, 0);          /* ht_size is NOT stored for directories */
+    put_be32(sd + BS - 16, 0);
+    put_be32(sd + BS - 12, SYNTH_ROOT);
+    put_be32(sd + BS - 8, 0);
+    put_be32(sd + BS - 4, AFS_ST_USERDIR);
+    sd[BS - 80] = 5;
+    memcpy(sd + BS - 79, "sub", 3);
+    sd[BS - 79 + 3] = 0;
+    memcpy(sd + BS - 79, "subdi", 5);
+    put_be32(sd + 20, afs_block_checksum(sd, BS, 20));
+
+    /* two files inside the subdirectory, filed under their real buckets */
+    uint32_t f1 = synth_add(&s, "inner1.txt", AFS_ST_FILE, 0, &next);
+    uint32_t f2 = synth_add(&s, "inner2.txt", AFS_ST_FILE, 0, &next);
+    {
+        uint32_t tsz = (uint32_t)afs_hash_table_size(BS);
+        synth_block_link(&s, sub, "inner1.txt", f1, tsz);
+        synth_block_link(&s, sub, "inner2.txt", f2, tsz);
+    }
+
+    /* link the subdirectory into the root */
+    synth_link(&s, "subdir", sub);
+
+    afs_volume_t *v = synth_open(&s);
+    if (!v) { CHECK(0, "volume opens"); return; }
+
+    afs_dirent_t ents[16];
+    size_t n = 0;
+    int rc = afs_dir_list(v, sub, ents, 16, &n);
+    CHECK_EQ_U(rc, 0, "a SUBDIRECTORY lists (ht_size derived, not read)");
+    CHECK_EQ_U(n, 2u, "the subdirectory has its own two entries");
+    if (n == 2) {
+        int a = 0, b = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (strcmp(ents[i].name, "inner1.txt") == 0) a = 1;
+            if (strcmp(ents[i].name, "inner2.txt") == 0) b = 1;
+        }
+        CHECK(a && b, "both inner files are listed");
+    }
+
+    /* and a lookup INSIDE the subdirectory must work */
+    afs_dirent_t e;
+    CHECK_EQ_U(afs_dir_lookup(v, sub, "inner1.txt", 10, &e), 0,
+               "lookup inside a subdirectory works");
+    afs_volume_close(v);
+}
+
 int main(void) {
     printf("dir\n");
     test_list_directory();
@@ -305,5 +375,6 @@ int main(void) {
     test_corrupt_chain_is_bounded();
     test_oob_chain_pointer_refused();
     test_listing_ignores_dircache();
+    test_subdirectory_listing();
     TEST_REPORT();
 }

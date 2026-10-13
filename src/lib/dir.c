@@ -77,11 +77,15 @@ int afs_dir_list(afs_volume_t *v, uint32_t dirblock,
     if (!dir) return -1;
     if (afs_volume_read_block(v, dirblock, dir, bsize) != 0) { free(dir); return -1; }
 
-    /* the rootblock and directory blocks share the T_HEADER layout with the
-     * hash table at offset 24 and ht_size at offset 12 */
+    /* Hash-table size: the ROOTBLOCK stores ht_size at offset 12, but a
+     * DIRECTORY block does not -- offsets 8/12/16 are unused there and read as
+     * 0. So we derive the table size from the block size whenever the stored
+     * field is zero. Reading the field blindly makes every subdirectory on
+     * every Amiga volume appear empty. */
     uint32_t ht_size = be32(dir + 12);
+    if (ht_size == 0) ht_size = (uint32_t)afs_hash_table_size(bsize);
     if (ht_size == 0 || (size_t)ht_size * 4 + 24 > bsize) {
-        /* bogus ht_size: refuse rather than walking a wild table */
+        /* bogus table: refuse rather than walking a wild hash table */
         free(dir);
         return -1;
     }
@@ -131,7 +135,9 @@ int afs_dir_lookup(afs_volume_t *v, uint32_t dirblock,
     if (!dir) return -1;
     if (afs_volume_read_block(v, dirblock, dir, bsize) != 0) { free(dir); return -1; }
 
+    /* see afs_dir_list: a directory block does not store ht_size, so derive it */
     uint32_t ht_size = be32(dir + 12);
+    if (ht_size == 0) ht_size = (uint32_t)afs_hash_table_size(bsize);
     if (ht_size == 0 || (size_t)ht_size * 4 + 24 > bsize) { free(dir); return -1; }
 
     uint32_t bucket = afs_hash(name, namelen, ht_size, afs_volume_flags(v));
