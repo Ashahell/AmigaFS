@@ -171,9 +171,12 @@ amigafs/
 - **Gate hardening:** exact Python set comparison instead of `comm` (which warns about tab ordering — a warning must never mask a real difference); hashing from stdin because GNU `sha256sum` escapes backslashes in filenames (which corrupted the `win32-names` comparison); `.info` sidecars filtered on both sides.
 - 8/8 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
-### M5 — Links
-- File hard links: inode = the `real_entry` header block; `st_nlink` counted through the `next_link` chain. Directory hard links become symlinks (C12). Softlinks: Amiga path → POSIX path (C11).
-- **Gate:** `links.adf` and `test_link_chains.adf` match the oracle, plus a unit table of path translations: `Vol:a/b`, `:a`, `/x`, `//x`, `a/b`.
+### M5 — Links ✅ COMPLETE (commit `be83d46`)
+- `links.c`: hard links chased through `real_entry` (BSIZE-44), **including links-to-links** with a loop guard, so one inode serves every name and `afs_file_nlink` counts the `next_link` chain. Directory hard links (`ST_LINKDIR`) are reported but **never traversed** — a hard-linked directory cycles the dentry cache, `find` and `du` (C12); the FUSE layer exposes them as symlinks.
+- Soft links (C11) translated: `Vol:`/`:` = volume root, `/x` and `//x` = volume-root-absolute, bare/multi-component = relative with one `../` per level. Because **the mount root *is* the volume root**, an absolute Amiga path becomes a relative POSIX path directly — every emitted target is non-empty and relative.
+- **Gate: met — `m5_gate` PASS.** Hard-file links and soft links resolve across `links.adf`, `test_link_chains.adf`, `testffs.adf`; the 3 directory hard links are exposed but not traversed; and hard links are proven to **share content by sha256** (1 shared hash in `links.adf`/`test_link_chains.adf`, 2 in `testffs.adf` — each a real-file + hard-link pair).
+- **A real bug the tests caught:** the softlink symbolic name is a plain **C-string, not a BCPL length-prefixed string**. Reading it with `bstr()` ate the first character (`target.txt` → `arget.txt`). The *file name* on the same block is BCPL; only the target is not.
+- 9/9 ctest, 0 warnings under `-Werror` with `-Wconversion`.
 
 ### M6 — Bitmap and verifier
 - `bitmap.c`: read the free/used bitmap, honouring the bitmap-valid flag. Expose it as `/.amigafs/bitmap`, a read-only synthetic file under a reserved directory name that cannot be an Amiga name (§6 D4).
