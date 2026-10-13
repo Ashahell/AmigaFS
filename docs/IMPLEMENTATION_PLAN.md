@@ -138,13 +138,16 @@ amigafs/
   - **`cache_crash.adf` is a negative fixture.** Pass = refuse with a named reason (`DOS\6 unsupported`), no crash, no partial mount. It also exercises the `DOS\6` refusal path itself.
   - The RDB image gives **full variant coverage in one mount** (M7).
 
-### M1 — Foundations
-- `be32`/`be16`/`bstr`; normal and bootblock checksums; `hash` with `capitalch`; Latin-1 ↔ UTF-8 conversion; `blockio` with a partition window and a bounded LRU cache.
-- **Gate:**
-  - golden vectors for both checksums, one taken from a real fixture block;
-  - hash vectors for each flag class, including bytes 224–254, byte 247 unchanged, and DIRC (`flags 4/5`) folding like INTL;
-  - Latin-1 round trip for all 256 bytes;
-  - an out-of-window read refuses.
+### M1 — Foundations ✅ COMPLETE (commits `3d34cf6`, `e37303c`)
+- `be32`/`be16`/`bstr`, `put_be32`/`put_be16`; both checksums; `hash`+`capitalch`+`afs_name_equal`; Latin-1 ↔ UTF-8; `blockio` with partition windows.
+- **Gate: met.** 4/4 ctest, **0 warnings** under `-Wall -Wextra -Wshadow -Wconversion -Wsign-conversion -Werror`. TDD throughout — every test was watched failing first.
+- **Golden vectors anchored to real bytes, not to our own arithmetic:**
+  - The embedded 512-byte `testffs.adf` rootblock validates against its own stored checksum `0x2ed093f8`.
+  - The bootblock algorithm was verified offline against every fixture: it matches `arccsh.adf` and `g1a30c.adf` **exactly**; the non-matches are fixtures that legitimately store `0` (non-bootable floppies) or the known-bad `ffdisk0049`.
+  - `français` (a real name in `testofs.adf`, `DOS\2`) hashes **71 without INTL and 47 with it** — the exact wrong-bucket bug the INTL fold prevents.
+  - DIRC flags 4/5 proven to fold identically to INTL for all 256 byte values.
+- **The integration gate earned its keep.** `m1_integration.c` runs the real stack over all 11 floppies: DOS type read correctly, rootblock located by the single formula (**880 for DD, 1760 for the HD fixture automatically**), and **every rootblock validates**. It found a bug unit tests could not: the **bootblock is 1024 bytes and spans blocks 0 and 1**, but `blockdev_read` refused `len > block_size`, so every bootblock read failed. Added `blockdev_read_span()` with whole-span bounds checking. It also caught a bug *in the gate itself* — the DOS id was compared through a host-endian cast, so it never matched big-endian `'D','O','S'`.
+- **Not yet built:** the bounded LRU block cache. Deferred to M8 with its concurrency test (D-level `threads=N` default 1); the blockio contract does not depend on it.
 
 ### M2 — Volume open and variant detection
 - DOS type on block 0 or block 1; flags; refuse anything outside `DOS\0`–`\5` with a named reason.
