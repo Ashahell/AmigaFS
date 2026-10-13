@@ -17,6 +17,7 @@ add_library(amigafs_core STATIC
   src/lib/checksum.c
   src/lib/hash.c
   src/lib/names.c
+  src/lib/blockio.c
 
 )
 target_include_directories(amigafs_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -28,6 +29,7 @@ set(AMIGAFS_UNIT_TESTS
   test_be
   test_checksum
   test_hash
+  test_blockio
 
 
 )
@@ -37,3 +39,6 @@ foreach(t ${AMIGAFS_UNIT_TESTS})
   target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit)
   add_test(NAME ${t} COMMAND ${t})
 endforeach()
+# ------------------------------------------------- integration (needs fixtures) ----
+add_executable(m1_integration tests/oracle/m1_integration.c)
+target_link_libraries(m1_integration PRIVATE amigafs_core)
