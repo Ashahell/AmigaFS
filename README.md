@@ -194,6 +194,19 @@ against `unadf` extraction (byte-for-byte), our link resolution against the
 secondary types, our RDB against `rdbtool`, and — for the mount — the bytes read
 *through a real FUSE mount* against the oracle.
 
+Two gates build their own sanitizer binaries instead of using the normal build,
+because "no crash" from an ordinary build only means "did not happen to
+segfault this run":
+
+- `fuzz_gate.sh` — hostile images through the **read** path (no crash, no hang).
+- `m16_write_fuzz.sh` — random create/overwrite/range/truncate/rename/unlink/
+  mkdir/rmdir/overflow sequences against an in-memory model, under **ASan +
+  UBSan + LeakSanitizer**. After every operation the volume must still *verify*
+  (checksums, pointer ranges, double-use, bitmap agreement, dir-cache vs hash
+  table), the tree must contain exactly the entries the model predicts, and
+  every file must read back byte-identical. It is what found a real leak on the
+  out-of-space path of `afs_file_write_all`.
+
 ## Licence
 
 MIT (see `LICENSE`). No third-party source is copied; ADFlib's test images carry

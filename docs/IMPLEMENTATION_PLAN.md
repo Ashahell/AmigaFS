@@ -338,6 +338,85 @@ grow/shrink/empty cases (80 checks).
 
 ---
 
+## M16 — Write-path differential fuzz (2026-10-14)
+
+The write path (M13a/b, M14, M15) is pointer surgery — hash-chain splicing,
+dir-cache record compaction with `memmove`, OFS header fixups, table rebuilds
+— and every gate up to here drove a handful of FIXED scenarios. A bug needing
+"an extension block AND a chain relink AND a cache record in one operation" is
+invisible to a fixed script and corrupts a volume silently: the file reads back
+with the wrong bytes, or the volume stops verifying, and nothing complains
+until an unrelated tool opens it.
+
+`tests/write_fuzz.c` + `tests/oracle/m16_write_fuzz.sh`: random operation
+sequences against an in-memory model of what the volume should contain, built
+and run under **ASan + UBSan + LeakSanitizer**. After **every** operation that
+returned success:
+
+1. `afs_verify_memory()` reports **zero** problems — checksums, pointer ranges,
+   block types, double-use, bitmap agreement, dir-cache vs hash table. A leaked
+   block, an eaten live block, a broken chain and a stale cache record all fail
+   here.
+2. A recursive tree walk yields **exactly** the model's set of `(path, kind)` —
+   no orphans, no duplicates, no missing entries.
+3. Every model's file reads back byte-identical.
+
+The model is only updated when the library reports success, so a refusal leaves
+it (and the volume) untouched — which is itself the assertion: a write that
+half-applies before failing shows up as a mismatch.
+
+**It found a real leak on the first run.** `afs_file_write_all` transferred
+ownership of the final block list to `dblks` only *after* every allocation
+succeeded, so the two `goto fail_inner`s from the allocation loops leaked the
+whole list. Invisible until a leak-checked build ran a write that ran out of
+room — an ENOSPC path no fixed gate exercised, and the one M13b's comment
+claimed "fails clean". Fixed by freeing `final_data` at `fail_inner` (it is
+NULL once ownership has moved). Reverting the fix turns the gate red with 120 KB
+in 17 allocations named at `file.c:519`.
+
+Three harness findings, all of the same shape — a green run that was not
+testing what it claimed:
+
+- **`resolve_dir` walked the wrong path.** It resolved the block of a
+  directory's *parent*, so `resolve_dir("rty")` answered "the root". The first
+  failure read as a library bug (a rename moved a file out of a subdirectory);
+  the volume was right and the model was wrong.
+- **Refusals were never exercised.** Every op picked a valid target, so
+  `refused` was 0 across an entire run — a gate with zero refusals has not
+  tested a single refusal path. Added a create aimed at an existing name (the
+  duplicate check) and an overflow write larger than the volume (the ENOSPC
+  discipline), plus a floor that fails the run when nothing was ever refused.
+- **"Corrupt" mode was not corrupt.** 24 random byte flips over a 900 KiB image
+  almost never land on structure (~4% of the bytes), so every corrupt-mode run
+  behaved identically to a clean one — zero refusals, zero interesting paths.
+  Damage is now aimed: a random *block*, then a random byte inside that block's
+  header or tail region.
+
+One sizing note: the first version allowed 8192-byte files and saturated the
+1756-block floppy within ~100 operations, after which every op needing even one
+block was refused — seed 3 "passed" with `trunc` never succeeding at all. Capped
+at 3000 bytes; out-of-space is now covered deliberately by `op_overflow` rather
+than by starving every operation.
+
+**Gate: `m16_write_fuzz.sh` PASS** — 6 clean seeds x 300 iterations, 3 corrupt
+seeds x 200, plus a determinism check (the same seed twice must produce the same
+verdict and the same tallies, or a failure could not be reproduced). Every op
+class succeeds at least once per run except `overflow`, which is *supposed* to
+be refused; the floor asserts exactly that rather than asserting the opposite of
+the design.
+
+Also added, deterministic and sanitizer-free: `test_enospc_leaves_content_intact`
+builds a volume with three free blocks and asserts a too-large write is refused
+with every byte of the previous content intact. Writing it surfaced a genuine
+trap, now documented at the builder: `afs_bitmap_set`/`afs_bitmap_clear` index
+an **assembled** map (page data areas concatenated, each page's checksum long
+stripped — what `afs_bitmap_read` produces), NOT a raw storage block. Passing a
+raw page parks blocks 0..31 inside that page's own checksum long, which the
+allocator never reads; the first version of this test "proved" a volume full of
+free blocks was full.
+
+---
+
 ## M15 — Partial-range writes + FUSE write ops (2026-10-14)
 
 Two pieces. The library gained `afs_file_write_range` (write `len` bytes at

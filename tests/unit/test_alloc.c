@@ -433,6 +433,81 @@ static void test_write_range_zero_gap(void) {
     free(img);
 }
 
+/* A volume with only `free_blocks` free blocks -- enough to provoke the
+ * out-of-space path deterministically, which no fixed scenario did until the
+ * write fuzz (M16) found a leak there under LeakSanitizer.
+ *
+ * GOTCHA worth stating, because the first version of this test got it wrong
+ * and "proved" a volume full of free blocks was full: afs_bitmap_set/clear
+ * index an ASSEMBLED map (what afs_bitmap_read produces -- the page data
+ * areas, concatenated, with each page's checksum long stripped), not a raw
+ * storage block. A block's bit sits at byte (blk/32)*4 + (blk%32)/8 of THAT
+ * buffer. Passing a raw page instead parks blocks 0..31 inside the page's own
+ * checksum long, which the allocator never reads. Hence: build the map
+ * separately, then copy it into the page at offset 4. */
+static uint8_t *build_writable_img_free(unsigned free_blocks) {
+    uint8_t *img = build_writable_img();
+    static uint8_t map[512];
+    uint8_t *bm;
+    unsigned avail = 0;
+    if (!img) return NULL;
+    memset(map, 0, sizeof map);            /* 0 = allocated */
+    for (unsigned i = 0; i < IMG_BLOCKS; i++) afs_bitmap_set(map, i);
+    for (unsigned i = 2; i < IMG_BLOCKS; i++) {
+        if (i == IMG_ROOT || i == IMG_BM) continue;
+        avail++;
+        if (avail > free_blocks) afs_bitmap_clear(map, i);
+    }
+    bm = img + (size_t)IMG_BM * 512;
+    memset(bm, 0, 512);
+    memcpy(bm + 4, map, 508);              /* the data area starts at 4 */
+    put_be32(bm + 0, afs_block_checksum(bm, 512, 0));
+    return img;
+}
+
+/* A write that cannot fit must be refused with the previous content intact --
+ * deficit blocks are allocated BEFORE anything is mutated. This is the
+ * user-visible half of what the fuzz found; the leak it found needs the
+ * sanitizer, and lives in the M16 gate. */
+static void test_enospc_leaves_content_intact(void) {
+    static uint8_t small[100], huge[8000];
+    uint8_t *img;
+    afs_volume_t *v = NULL;
+    uint32_t hdr = 0;
+    void *got = NULL;
+    size_t gotlen = 0;
+    size_t i;
+    for (i = 0; i < sizeof small; i++) small[i] = (uint8_t)(i ^ 0x3C);
+    for (i = 0; i < sizeof huge; i++) huge[i] = (uint8_t)(0xE1 - (i & 0x7F));
+    /* room for the header plus a couple of data blocks: enough for `small`,
+     * nowhere near enough for `huge` */
+    img = build_writable_img_free(3);
+    CHECK(img != NULL, "image allocated");
+    CHECK_EQ_U(afs_volume_open_memory(img, (size_t)IMG_BLOCKS * 512, 512,
+                                      &v, NULL, 0), 0, "volume opens");
+    CHECK_EQ_U(afs_file_create(v, IMG_ROOT, "tight", 5, &hdr, NULL, 0), 0,
+               "create succeeds");
+    char err[256] = {0};
+    CHECK_EQ_U(afs_file_write_all(v, hdr, small, sizeof small, err, sizeof err), 0,
+               "100 bytes fit");
+    CHECK(afs_file_write_all(v, hdr, huge, sizeof huge, NULL, 0) != 0,
+           "8000 bytes refused (out of space)");
+    CHECK_EQ_U(afs_file_read_all(v, IMG_ROOT, "tight", 5, &got, &gotlen), 0,
+               "reread succeeds");
+    CHECK_EQ_U(gotlen, sizeof small, "length unchanged by the refused write");
+    CHECK(got && memcmp(got, small, sizeof small) == 0,
+           "every byte of the previous content intact");
+    free(got);
+    CHECK_EQ_U(afs_file_write_all(v, hdr, NULL, 0, NULL, 0), 0,
+               "truncate to empty still fits");
+    CHECK_EQ_U(afs_file_read_all(v, IMG_ROOT, "tight", 5, &got, &gotlen), 0,
+               "reread after truncate");
+    CHECK_EQ_U(gotlen, 0, "emptied");
+    free(got);
+    afs_volume_close(v);
+    free(img);
+}
+
 int main(void) {
     printf("alloc/write\n");
     test_write_backend_memory();
@@ -447,5 +522,6 @@ int main(void) {
     test_rename_within_and_across();
     test_write_range_span();
     test_write_range_zero_gap();
+    test_enospc_leaves_content_intact();
     TEST_REPORT();
 }

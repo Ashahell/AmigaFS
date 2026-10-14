@@ -621,9 +621,16 @@ fail_inner:
         /* No transactions in M13b either: an I/O failure mid-rewrite can leave
          * allocated-but-unreferenced blocks (verify reports the volume as it
          * is). Nothing is ever half-LINKED: linking happened once at create
-         * and this function never links at all. */
+         * and this function never links at all.
+         *
+         * `final_data` must be freed HERE, not only at `fail`: ownership moves
+         * to `dblks` only AFTER every allocation succeeds, so the two
+         * `goto fail_inner`s from the allocation loops leaked the whole block
+         * list. It was invisible until a leak-checked build ran a write that
+         * ran out of room -- an ENOSPC path no fixed gate exercised. */
         free(old_data);
         free(old_ext);
+        free(final_data);   /* NULL once ownership moved to dblks */
         goto fail;
 write_done:;
     }
