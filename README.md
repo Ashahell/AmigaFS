@@ -84,6 +84,20 @@ remainder — rather than guessing at the rest.
 `afs ls` marks each entry: `d` directory, `f` file, `l` symlink, `h` file with
 multiple hard links, `D` directory hard link.
 
+On an RDB-partitioned image the first path component names the partition --
+the same namespace the mount exposes, so the two can never disagree about
+where a file lives:
+
+```sh
+./build/afs info   disk.hdd              # the partition table (names, DOS types, sizes)
+./build/afs info   disk.hdd "OFS INTL"   # volume info for one partition
+./build/afs ls     disk.hdd              # the partition names, as the mount root shows
+./build/afs ls     disk.hdd "FFS DirCache" -R
+./build/afs cat    disk.hdd "OFS/Trashcan.info"
+./build/afs verify disk.hdd              # every partition, each report named
+./build/afs bitmap disk.hdd FFS          # the bitmap needs one partition
+```
+
 ## What it supports
 
 - **Volumes:** `DOS\0`–`DOS\5`. `DOS\6`/`DOS\7` (AmigaOS 3.2 long filenames),

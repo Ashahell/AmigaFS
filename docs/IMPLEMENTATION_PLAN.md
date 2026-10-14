@@ -250,6 +250,41 @@ them go red.
 
 ---
 
+## M12 — CLI on RDB-partitioned images (2026-10-14)
+
+The mount has understood partitions since M7/M10; the CLI did not — every
+subcommand opened the whole image as one volume, so any RDB image failed with
+`no DOS filesystem id on block 0 or block 1`. Fixed by resolving the **first
+path component as the partition name when (and only when) the image carries an
+RDB**, mirroring the mount namespace, so the two can never disagree about
+where a file lives. No new syntax, no new flags: `afs ls disk.hdd "OFS INTL"`,
+`afs cat disk.hdd OFS/Trashcan.info`. `info` alone prints the partition table
+in `rdbtool`'s shape; `verify` checks every partition's own window and names
+it; `bitmap` requires a partition on RDB (named refusal listing the names);
+bare `ls` lists the partitions as the mount root does. Floppy behavior is
+byte-identical: the no-RDB path is the untouched old code.
+
+**Gate: `m12_cli_rdb.sh` PASS.** `info` table == `rdbtool` (6/6, shape-parsed —
+DriveNames contain spaces); `ls -R` per partition == live mount (full relative
+paths, not basenames, so same-named files in different dirs cannot collapse);
+`cat` bytes == mount for all files **plus** `xdftool` for partition 0 (ends the
+transitivity at a second independent oracle); `verify` clean on all 6;
+`bitmap` used+free == RDB size per partition; refusals named (unknown
+partition, bitmap-without-partition); floppy positive control (`ls` == `adfls`,
+9/9 `cat` bytes == `unadf`) in the same harness.
+
+**Load-bearing proof:** a mutant resolving every name to partition 0 is caught
+in **four** independent places (5 DOS-type mismatches, 5 byte mismatches, wrong
+bitmap counts, unknown-partition refusal never firing). Writing that proof
+exposed that the `info <part>` check as first written accepted root=3078 for
+five partitions — the size check alone cannot see a wrong-partition open — so
+it now also asserts the DOS type the RDB advertises for that partition.
+
+**Two gate bugs caught during the run:** the `D` (dir-hard-link) kind marker
+is uppercase and the `[a-z]` strip class dropped those lines; and a whitespace
+edit merged two lines and commented out the table assignment (`set -u` turned
+it into `info_out: unbound variable` rather than a silent empty diff).
+
 
 - **12/12** unit tests, **7/7** oracle gates, **20/20** ctest, **0** warnings under `-Wall -Wextra -Wshadow -Wconversion -Werror`.
 - Real Amiga disks mount read-only on Linux and read **byte-for-byte identically** to the ADFlib oracle (197 files through a live FUSE mount; 216 via the library).
