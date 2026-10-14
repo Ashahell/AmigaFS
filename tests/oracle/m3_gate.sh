@@ -43,6 +43,35 @@ for f in "$FIX"/*.adf; do
     rm -f /tmp/m3_ours.$$ /tmp/m3_adflib.$$
 done
 
+# --- CLI lookup is case-INsensitive (decision D5) -------------------------
+#
+# D5 says "exact-match in the mount, case-insensitive only through the CLI".
+# The mount half is the kernel's job and is untestable here. The CLI half was
+# for years described as living behind an `afs ls -i` flag that never existed:
+# the lookup was ALREADY case-insensitive, because afs_dir_lookup compares
+# with the same capitalch the hash uses. Rather than add a flag that does
+# nothing, this pins the behaviour the decision record actually promised.
+#
+# If this check is ever removed, `-i` will be "added" as a no-op and the record
+# will look right again while nothing is tested.
+if [[ -x "$ROOT/build/afs" ]]; then
+    CS="$FIX/win32-names.adf"
+    if [[ -f "$CS" ]]; then
+        "$ROOT/build/afs" ls "$CS" /forbidden-files  > /tmp/m3_ci_exact.$$ 2>&1; rc_exact=$?
+        "$ROOT/build/afs" ls "$CS" /FORBIDDEN-FILES  > /tmp/m3_ci_upper.$$ 2>&1; rc_upper=$?
+        "$ROOT/build/afs" ls "$CS" /ForBiddEn-FiLeS  > /tmp/m3_ci_mixed.$$ 2>&1; rc_mixed=$?
+        if [[ $rc_exact -eq 0 && $rc_upper -eq 0 && $rc_mixed -eq 0 ]] \
+           && cmp -s /tmp/m3_ci_exact.$$ /tmp/m3_ci_upper.$$ \
+           && cmp -s /tmp/m3_ci_exact.$$ /tmp/m3_ci_mixed.$$; then
+            ok "CLI path lookup is case-insensitive (exact/UPPER/MiXeD identical, $(wc -l < /tmp/m3_ci_exact.$$ | tr -d ' ') lines)"
+        else
+            bad "CLI lookup is not case-insensitive (rc $rc_exact/$rc_upper/$rc_mixed); D5's promise is unmet"
+            diff /tmp/m3_ci_exact.$$ /tmp/m3_ci_upper.$$ 2>&1 | head -5 >&2
+        fi
+        rm -f /tmp/m3_ci_exact.$$ /tmp/m3_ci_upper.$$ /tmp/m3_ci_mixed.$$
+    fi
+fi
+
 echo
 if [[ $fails -eq 0 ]]; then echo "M3 gate: PASS"; exit 0; fi
 echo "M3 gate: $fails failure(s)" >&2

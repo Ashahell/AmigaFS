@@ -172,7 +172,8 @@ example, and the two traps worth knowing about.
   a hard-linked directory is a cycle the kernel dentry cache cannot represent.
   They are still listed.
 - **Lookup is exact-match** in the mount (the kernel owns names); the Amiga's
-  case-insensitivity is available in the CLI, not behind the POSIX VFS.
+  case-insensitivity is the CLI's default (`afs ls img /FORBIDDEN-FILES` finds
+  `forbidden-files`), not behind the POSIX VFS and not behind a flag.
 - **The directory cache is parsed and verified but not used for listing.** The
   hash table is the authority, so a stale cache cannot hide a file.
 - **64-bit (`ffstd64`) volumes** are refused rather than misread.

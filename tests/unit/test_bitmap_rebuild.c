@@ -28,6 +28,7 @@
  */
 #include "test.h"
 #include "amigafs/be.h"
+#include "amigafs/bitmap.h"
 #include "amigafs/blocktypes.h"
 #include "amigafs/checksum.h"
 #include "amigafs/hash.h"
@@ -35,19 +36,6 @@
 
 #define BS 512
 #define NBLK 16
-
-/* Declared here rather than via bitmap.h so this file compiles (and FAILS)
- * against a tree that does not have the function yet. */
-typedef struct {
-    uint32_t total;
-    uint32_t used;
-    uint32_t free_blocks;
-    uint32_t reclaimed;
-} afs_bitmap_rebuild_stats_t;
-
-extern int afs_bitmap_rebuild(afs_volume_t *v,
-                              afs_bitmap_rebuild_stats_t *stats,
-                              char *errbuf, size_t errlen);
 
 static void bm_set(uint8_t *map, uint32_t blk) {
     map[blk / 32 * 4 + (blk % 32) / 8] |= (uint8_t)(0x80 >> (blk % 8));
@@ -207,11 +195,99 @@ static void test_rebuild_refuses_a_short_volume(void) {
     }
 }
 
+/* --- multi-page coverage -------------------------------------------------
+ *
+ * NOT a test-first test. The paging code already existed when this was
+ * written, so this cannot fail first and does not pretend to. Its value is
+ * proven by a MUTANT instead: changing the per-page offset from
+ * `i * (bs - 4)` to `i * bs` must turn it red. Assert the reason in the
+ * comment, or a future reader will trust the coverage it appears to provide.
+ *
+ * Why it matters: every OPENABLE fixture needs exactly ONE bitmap page
+ * (measured across all 11 — the 2-page one, g1a30c.adf, is the corrupt
+ * fixture a rebuild refuses). So without this the second page's offset is
+ * never computed by any test in the project, and a volume large enough to
+ * need one -- roughly 2048 blocks at 512 bytes -- would be rebuilt with its
+ * second page written at the wrong offset.
+ *
+ * 4200 blocks at bs=512 needs two pages: ceil(ceil(4200/32) / 128) = 2. The
+ * rootblock lands at (2+4199)/2 = 2100, and block 4096 is the first block
+ * the SECOND page describes. */
+#define MP_NBLK 4200
+#define MP_ROOT 2100
+#define MP_P0   2101
+#define MP_P1   2102
+
+static void test_rebuild_writes_both_bitmap_pages(void) {
+    size_t imgsz = (size_t)MP_NBLK * BS;
+    uint8_t *img = calloc(1, imgsz);
+    if (!img) { CHECK(0, "out of memory building the 2-page image"); return; }
+
+    put_be32(img, ((uint32_t)'D' << 24) | ((uint32_t)'O' << 16) |
+                  ((uint32_t)'S' << 8) | 0x01);
+
+    uint8_t *r = img + MP_ROOT * BS;
+    put_be32(r, AFS_T_HEADER);
+    put_be32(r + 12, (uint32_t)afs_hash_table_size(BS));
+    put_be32(r + BS - 200, 0xFFFFFFFFu);
+    put_be32(r + BS - 196, MP_P0);
+    put_be32(r + BS - 192, MP_P1);
+    put_be32(r + BS - 96, 0);
+    put_be32(r + BS - 8, 0);
+    r[BS - 80] = 3; memcpy(r + BS - 79, "big", 3);
+    put_be32(r + BS - 4, AFS_ST_ROOT);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    afs_volume_t *v = NULL;
+    char err[256];
+    CHECK(afs_volume_open_memory(img, imgsz, BS, &v, err, sizeof err) == 0,
+          "2-page volume opens (%s)", err);
+
+    afs_bitmap_rebuild_stats_t st;
+    CHECK(afs_bitmap_rebuild(v, &st, err, sizeof err) == 0,
+          "rebuild succeeds on a 2-page volume (%s)", err);
+
+    CHECK_EQ_U(st.total, MP_NBLK, "volume reports every block");
+
+    /* Both pages must carry a valid checksum. An unwritten or mis-offset
+     * second page is zeros, whose checksum is zero -- which would read as
+     * "valid" to a naive check, so the bit assertions below matter too. */
+    CHECK(afs_block_valid(img + MP_P0 * BS, BS, 0), "page 0 checksum valid");
+    CHECK(afs_block_valid(img + MP_P1 * BS, BS, 0), "page 1 checksum valid");
+
+    /* Read the map back through the PUBLIC reader, so the assertion exercises
+     * the same reassembly the allocator and `afs bitmap` use. */
+    size_t mapbytes = ((size_t)MP_NBLK + 31u) / 32u * 4u;
+    uint8_t *map = calloc(1, mapbytes);
+    int pages = afs_bitmap_read(v, map, mapbytes);
+    CHECK_EQ_U(pages, 2, "reader reassembles two pages");
+
+    /* Block 4096 is the first block ONLY page 1 can describe. If the write
+     * offset is wrong this bit comes back wrong, which is the whole point. */
+    CHECK_EQ_U(bm_get(map, 4096), 1, "block 4096 (page 1's first block) is free");
+    CHECK_EQ_U(bm_get(map, MP_NBLK - 1), 0, "volume tail still used");
+    CHECK_EQ_U(bm_get(map, MP_ROOT), 0, "rootblock still used");
+    CHECK_EQ_U(bm_get(map, MP_P0), 0, "bitmap page 0 still used");
+    CHECK_EQ_U(bm_get(map, MP_P1), 0, "bitmap page 1 still used");
+
+    /* An empty tree, so the only used blocks are the three the rebuild marks
+     * explicitly; every other block in [2, nblocks-2) must read free. */
+    uint32_t free_seen = 0;
+    for (uint32_t b = 0; b < MP_NBLK; b++) if (bm_get(map, b)) free_seen++;
+    CHECK_EQ_U(free_seen, MP_NBLK - 6,
+               "exactly the unreferenced blocks read free (tail excluded)");
+
+    free(map);
+    afs_volume_close(v);
+    free(img);
+}
+
 int main(void) {
     test_rebuild_never_frees_the_structural_blocks();
     test_rebuild_sets_the_valid_flag();
     test_rebuild_frees_what_the_tree_does_not_reach();
     test_rebuild_is_idempotent();
     test_rebuild_refuses_a_short_volume();
+    test_rebuild_writes_both_bitmap_pages();
     TEST_REPORT();
 }
