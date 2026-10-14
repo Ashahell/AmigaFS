@@ -60,6 +60,65 @@ static int resolve_file_block(afs_volume_t *v, uint32_t entryblock,
     return -1;   /* a directory or softlink is not a file here */
 }
 
+/* Collect a header's extension-block chain, strictly: every link must be in
+ * range, readable, and a file-extension block, or the whole call refuses.
+ * Building on (or freeing through) a corrupt chain would bake it in. Empty
+ * chain yields *arr == NULL, *n == 0. */
+static int collect_ext_blocks(afs_volume_t *v, const uint8_t *hdr, size_t bs,
+                              uint32_t **arr, size_t *n,
+                              char *errbuf, size_t errlen) {
+    uint32_t cur = be32(hdr + bs - 8);
+    uint32_t guard = 0, limit = afs_volume_block_count(v);
+    size_t count = 0;
+    uint32_t *out = NULL;
+    size_t i;
+
+    *arr = NULL;
+    *n = 0;
+    while (cur != 0) {
+        uint8_t *eb = malloc(bs);
+        if (!eb) { set_err(errbuf, errlen, "out of memory"); return -1; }
+        if (cur >= limit || guard++ > limit) {
+            free(eb);
+            set_err(errbuf, errlen, "extension chain corrupt");
+            return -1;
+        }
+        if (afs_volume_read_block(v, cur, eb, bs) != 0 ||
+            afs_block_kind(eb, bs) != AFS_BLOCK_FILEEXT) {
+            free(eb);
+            set_err(errbuf, errlen, "extension chain corrupt");
+            return -1;
+        }
+        cur = be32(eb + bs - 8);
+        free(eb);
+        count++;
+        if (count > limit) {
+            set_err(errbuf, errlen, "extension chain corrupt");
+            return -1;
+        }
+    }
+    if (count == 0) return 0;
+    out = calloc(count, sizeof *out);
+    if (!out) { set_err(errbuf, errlen, "out of memory"); return -1; }
+    cur = be32(hdr + bs - 8);
+    for (i = 0; i < count; i++) {
+        uint8_t *eb = malloc(bs);
+        if (!eb) {
+            free(out);
+            set_err(errbuf, errlen, "out of memory");
+            return -1;
+        }
+        /* re-validated above; cannot fail here */
+        afs_volume_read_block(v, cur, eb, bs);
+        out[i] = cur;
+        cur = be32(eb + bs - 8);
+        free(eb);
+    }
+    *arr = out;
+    *n = count;
+    return 0;
+}
+
 /* Collect the file's data block numbers, walking the header -> extension
  * chain until `need` pointers have been gathered. The table is REVERSED, so
  * the pointer for file block i is at index (entries-1-i). */
@@ -344,7 +403,7 @@ int afs_file_create(afs_volume_t *v, uint32_t dirblock,
     rec.days = (int16_t)dd; rec.mins = (int16_t)mm; rec.ticks = (int16_t)tt;
     rec.sec_type = (uint8_t)AFS_ST_FILE;
     memcpy(rec.name, name, namelen < 30 ? namelen : 30);
-    if (afs_dircache_upsert(v, dirblock, &rec, errbuf, errlen) != 0) return -1;
+    if (afs_dircache_upsert(v, dirblock, &rec, NULL, 0, errbuf, errlen) != 0) return -1;
 
     *hdr_out = nb;
     return 0;
@@ -403,60 +462,14 @@ int afs_file_write_all(afs_volume_t *v, uint32_t hdrblock,
         /* old data list (empty for a fresh header: collect_blocks with
          * need 0 yields NULL, which is exactly "nothing to keep") */
         if (old_n > 0) {
-            uint32_t cur = be32(hdr + bs - 8);
-            uint32_t guard = 0, limit = afs_volume_block_count(v);
-            /* old extension blocks, walked strictly: building on a corrupt
-             * chain would bake it in, so refuse with a name instead */
-            while (cur != 0) {
-                uint8_t *eb;
-                if (cur >= limit || guard++ > limit) {
-                    free(hdr);
-                    set_err(errbuf, errlen, "extension chain corrupt");
-                    return -1;
-                }
-                eb = malloc(bs);
-                if (!eb) {
-                    free(hdr);
-                    set_err(errbuf, errlen, "out of memory");
-                    return -1;
-                }
-                if (afs_volume_read_block(v, cur, eb, bs) != 0 ||
-                    afs_block_kind(eb, bs) != AFS_BLOCK_FILEEXT) {
-                    free(eb); free(hdr);
-                    set_err(errbuf, errlen, "extension chain corrupt");
-                    return -1;
-                }
-                cur = be32(eb + bs - 8);
-                free(eb);
-                old_ext_n++;
-                if (old_ext_n > nblocks + entries + 64) {
-                    free(hdr);
-                    set_err(errbuf, errlen, "extension chain corrupt");
-                    return -1;
-                }
+            uint32_t *el = NULL;
+            size_t en = 0;
+            if (collect_ext_blocks(v, hdr, bs, &el, &en, errbuf, errlen) != 0) {
+                free(hdr);
+                return -1;
             }
-            if (old_ext_n > 0) {
-                old_ext = calloc(old_ext_n, sizeof *old_ext);
-                if (!old_ext) {
-                    free(hdr);
-                    set_err(errbuf, errlen, "out of memory");
-                    return -1;
-                }
-                cur = be32(hdr + bs - 8);
-                for (i = 0; i < old_ext_n; i++) {
-                    uint8_t *eb = malloc(bs);
-                    if (!eb) {
-                        free(old_ext); free(hdr);
-                        set_err(errbuf, errlen, "out of memory");
-                        return -1;
-                    }
-                    /* re-validated above; cannot fail here */
-                    afs_volume_read_block(v, cur, eb, bs);
-                    old_ext[i] = cur;
-                    cur = be32(eb + bs - 8);
-                    free(eb);
-                }
-            }
+            old_ext = el;
+            old_ext_n = en;
             if (collect_blocks(v, hdrblock, old_n, &old_data) != 0) {
                 free(old_ext); free(hdr);
                 set_err(errbuf, errlen, "cannot read existing data blocks");
@@ -605,7 +618,7 @@ write_done:;
             bstr(hdr + bs - 80, 31, nm, sizeof nm);
             memcpy(rec.name, nm, strlen(nm) < 30 ? strlen(nm) : 30);
         }
-        if (afs_dircache_upsert(v, parent, &rec, errbuf, errlen) != 0) {
+        if (afs_dircache_upsert(v, parent, &rec, NULL, 0, errbuf, errlen) != 0) {
             /* upsert already named the reason in errbuf; keep it */
             goto fail;
         }
@@ -625,4 +638,92 @@ fail:
     free(dblks);
     free(hdr);
     return -1;
+}
+
+int afs_file_delete(afs_volume_t *v, uint32_t dirblock,
+                    const char *name, size_t namelen,
+                    char *errbuf, size_t errlen) {
+    size_t bs, payload;
+    uint8_t *hdr = NULL;
+    afs_dirent_t e;
+    uint32_t target, byte_size, old_n, i;
+    uint32_t *old_data = NULL, *old_ext = NULL;
+    size_t old_ext_n = 0;
+
+    if (!v || !name) { set_err(errbuf, errlen, "bad arguments"); return -1; }
+    if (afs_dir_lookup(v, dirblock, name, namelen, &e) != 0) {
+        set_err(errbuf, errlen, "'%.*s' not found", (int)namelen, name);
+        return -1;
+    }
+    if (e.kind != AFS_BLOCK_FILE) {
+        if (e.kind == AFS_BLOCK_DIR)
+            set_err(errbuf, errlen, "'%.*s' is a directory",
+                    (int)namelen, name);
+        else
+            set_err(errbuf, errlen, "cannot delete links yet (only files/dirs)");
+        return -1;
+    }
+    target = e.block;
+    bs = afs_volume_block_size(v);
+    payload = data_payload(v, bs);
+    hdr = malloc(bs);
+    if (!hdr) { set_err(errbuf, errlen, "out of memory"); return -1; }
+    if (afs_volume_read_block(v, target, hdr, bs) != 0) {
+        free(hdr);
+        set_err(errbuf, errlen, "cannot read file header %u", target);
+        return -1;
+    }
+    byte_size = be32(hdr + bs - 188);
+    old_n = (byte_size == 0) ? 0
+        : (uint32_t)((byte_size + (uint32_t)payload - 1) / (uint32_t)payload);
+    if (old_n > 0) {
+        if (collect_ext_blocks(v, hdr, bs, &old_ext, &old_ext_n,
+                               errbuf, errlen) != 0) {
+            free(hdr);
+            return -1;
+        }
+        if (collect_blocks(v, target, old_n, &old_data) != 0) {
+            free(old_ext);
+            free(hdr);
+            set_err(errbuf, errlen, "cannot read file data blocks");
+            return -1;
+        }
+    }
+    free(hdr);
+    /* unlink first: after this the name is gone whatever follows */
+    {
+        uint32_t gone = 0;
+        if (afs_dir_unlink(v, dirblock, name, namelen, &gone,
+                           errbuf, errlen) != 0) {
+            free(old_data);
+            free(old_ext);
+            return -1;
+        }
+        if (gone != target) {
+            free(old_data);
+            free(old_ext);
+            set_err(errbuf, errlen, "unlink raced lookup (internal)");
+            return -1;
+        }
+    }
+    if (afs_dircache_del(v, dirblock, target, errbuf, errlen) != 0) {
+        free(old_data);
+        free(old_ext);
+        return -1;
+    }
+    for (i = 0; i < old_n; i++)
+        if (afs_free_block(v, old_data[i], errbuf, errlen) != 0) {
+            free(old_data);
+            free(old_ext);
+            return -1;
+        }
+    free(old_data);
+    for (i = 0; i < old_ext_n; i++)
+        if (afs_free_block(v, old_ext[i], errbuf, errlen) != 0) {
+            free(old_ext);
+            return -1;
+        }
+    free(old_ext);
+    if (afs_free_block(v, target, errbuf, errlen) != 0) return -1;
+    return 0;
 }

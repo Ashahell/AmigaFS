@@ -336,6 +336,40 @@ asserts round-trip through ADFlib readers + verify + bitmap accounting +
 folding resolution instead -- stated, not hidden. Unit suite grew
 grow/shrink/empty cases (80 checks).
 
+---
+
+## M14 — Delete + rename (2026-10-14)
+
+`afs rm` (files + empty dirs) and `afs mv` (same-volume rename/move),
+semantics mirrored from ADFlib's own `adfRemoveEntry`/`adfRenameEntry` source
+rather than memory: non-empty rmdir refused, file delete frees header + data
++ extension blocks, empty-dir delete frees the dir plus its whole cache chain
+(ADFlib frees only the first -- ours frees all, and bitmap accounting proves
+it), rename rewrites name+parent in place with unlink/relink + duplicate
+check + cache del/add, same-name same-dir is a no-op, links refused like
+ADFlib refuses them, and a directory moved into its own subtree is refused
+(the walk-up, not just equality). ENOSPC/order discipline as M13b: unlink
+first so failures leak storage but never half-link.
+
+**Gate: `m14_delete.sh` PASS (21 checks).** Bitmap deltas exact per variant
+(OFS file -213 = 1+210+2, FFS -203 = 1+200+2, DIRC rmdir -6 = 2 files + dir +
+cache); moved bytes == `unadf`; xdftool's `delete` visible to us (it has no
+rename -- stated); RDB round-trip leaves all 6 partitions identical; deletions
+mount-visible. Refusals all named (non-empty, occupied victim with victim
+intact, self/subtree cycles, cross-partition, links).
+
+**Two gate-hygiene findings from the mutant runs.** (1) The always-partition-0
+mutant style of proof was repeated for both refusal paths: blinded duplicate
+check and blinded cycle check each turn their gate case red -- except the
+subtree case PASSED under its mutant, which meant the case was broken, not the
+code: the self-move case runs first and, once it succeeds under the mutant,
+unlinks D1 from the root, so the subtree case cannot resolve its paths and
+passes vacuously on a corrupt volume. Destructive cases now get FRESH copies
+each ("shared state between destructive cases is how a mutant hides"), and
+both fire. (2) `verify` reports a cyclic-orphan volume clean -- unreachable
+blocks are a collection problem, not a verification problem; recorded, not
+fixed.
+
 
 - **12/12** unit tests, **7/7** oracle gates, **20/20** ctest, **0** warnings under `-Wall -Wextra -Wshadow -Wconversion -Werror`.
 - Real Amiga disks mount read-only on Linux and read **byte-for-byte identically** to the ADFlib oracle (197 files through a live FUSE mount; 216 via the library).

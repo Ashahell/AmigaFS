@@ -35,6 +35,8 @@ static int usage(void) {
         "  afs bitmap <image> <partition>\n"
         "  afs put    <image> <partition/path> <local-file>\n"
         "  afs mkdir  <image> <partition/dir>\n"
+        "  afs rm     <image> <partition/path>\n"
+        "  afs mv     <image> <partition/src> <partition/dst>\n"
         "On an RDB-partitioned image the first path component names the\n"
         "partition (as in the FUSE mount); `info` alone lists the partitions.\n"
         "Writes go to the image file itself: work on a copy, never a fixture.\n");
@@ -529,6 +531,94 @@ static int cmd_mkdir(const char *image, const char *path) {
     return 0;
 }
 
+static int cmd_rm(const char *image, const char *path) {
+    afs_volume_t *v = NULL;
+    uint32_t dirblk = 0;
+    const char *base = NULL;
+    char dirbuf[512], err[256] = {0};
+    afs_dirent_t e;
+
+    if (open_parent_rw(image, path, &v, &dirblk, &base, dirbuf, sizeof dirbuf) != 0)
+        return 1;
+    if (afs_dir_lookup(v, dirblk, base, strlen(base), &e) != 0) {
+        fprintf(stderr, "afs: %s: not found\n", path);
+        afs_volume_close(v);
+        return 1;
+    }
+    if (e.kind == AFS_BLOCK_FILE) {
+        if (afs_file_delete(v, dirblk, base, strlen(base), err, sizeof err) != 0) {
+            fprintf(stderr, "afs: cannot rm %s: %s\n", path, err);
+            afs_volume_close(v);
+            return 1;
+        }
+    } else if (e.kind == AFS_BLOCK_DIR) {
+        if (afs_dir_rmdir(v, dirblk, base, strlen(base), err, sizeof err) != 0) {
+            fprintf(stderr, "afs: cannot rm %s: %s\n", path, err);
+            afs_volume_close(v);
+            return 1;
+        }
+    } else {
+        fprintf(stderr, "afs: cannot rm %s: links not supported yet\n", path);
+        afs_volume_close(v);
+        return 1;
+    }
+    afs_volume_close(v);
+    return 0;
+}
+
+/* First path component: the partition selector on RDB images. */
+static void first_component(const char *path, char *out, size_t cap) {
+    size_t o = 0;
+    if (cap == 0) return;
+    while (*path == '/') path++;
+    while (*path && *path != '/' && o + 1 < cap) out[o++] = *path++;
+    out[o] = '\0';
+}
+
+static int cmd_mv(const char *image, const char *src, const char *dst) {
+    afs_volume_t *vs = NULL, *vd = NULL;
+    uint32_t sdir = 0, ddir = 0;
+    const char *sbase = NULL, *dbase = NULL;
+    char sdirbuf[512], ddirbuf[512], err[256] = {0};
+    afs_rdb_t rdb;
+    int has_rdb = probe_rdb(image, &rdb);
+    if (has_rdb < 0) { fprintf(stderr, "afs: cannot open %s\n", image); return 1; }
+
+    if (has_rdb) {
+        /* cross-partition moves do not exist: block addresses are
+         * partition-relative, so a move would be copy+delete, not a rename.
+         * Refuse with both names rather than half-moving. Selectors are
+         * exact-match DriveNames, so equal strings name one volume. */
+        char ss[256], ds[256];
+        first_component(src, ss, sizeof ss);
+        first_component(dst, ds, sizeof ds);
+        if (!ss[0] || !ds[0] || strcmp(ss, ds) != 0) {
+            fprintf(stderr, "afs: cannot move across partitions ('%s' vs '%s')\n",
+                    ss[0] ? ss : "(none)", ds[0] ? ds : "(none)");
+            return 1;
+        }
+    }
+    /* Two handles on the same window: partition-relative block numbers from
+     * either resolve identically, and each side reuses the tested open path
+     * instead of duplicating selector-stripping a third time. */
+    if (open_parent_rw(image, src, &vs, &sdir, &sbase, sdirbuf, sizeof sdirbuf) != 0)
+        return 1;
+    if (open_parent_rw(image, dst, &vd, &ddir, &dbase, ddirbuf, sizeof ddirbuf) != 0) {
+        afs_volume_close(vs);
+        return 1;
+    }
+    if (afs_dir_rename(vs, sdir, sbase, strlen(sbase),
+                       ddir, dbase, strlen(dbase), err, sizeof err) != 0) {
+        fprintf(stderr, "afs: cannot mv %s: %s\n", src, err);
+        afs_volume_close(vs);
+        afs_volume_close(vd);
+        return 1;
+    }
+    afs_volume_close(vs);
+    afs_volume_close(vd);
+    return 0;
+}
+
 static int cmd_verify(const char *image) {
     size_t sz = 0;
     unsigned char *img = read_file(image, &sz);
@@ -669,6 +759,14 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "mkdir") == 0) {
         if (argc < 4) { fprintf(stderr, "afs: mkdir needs a path\n"); return 2; }
         return cmd_mkdir(image, argv[3]);
+    }
+    if (strcmp(cmd, "rm") == 0) {
+        if (argc < 4) { fprintf(stderr, "afs: rm needs a path\n"); return 2; }
+        return cmd_rm(image, argv[3]);
+    }
+    if (strcmp(cmd, "mv") == 0) {
+        if (argc < 5) { fprintf(stderr, "afs: mv needs source and destination\n"); return 2; }
+        return cmd_mv(image, argv[3], argv[4]);
     }
     return usage();
 }

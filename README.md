@@ -98,6 +98,8 @@ where a file lives:
 ./build/afs bitmap disk.hdd FFS          # the bitmap needs one partition
 ./build/afs put    disk.hdd "FFS/NEWDIR/payload" payload.bin
 ./build/afs mkdir  disk.hdd "FFS/NEWDIR"
+./build/afs rm     disk.hdd "FFS/NEWDIR/payload"   # files + empty dirs only
+./build/afs mv     disk.hdd "FFS/NEWDIR/payload" "FFS/NEWDIR/renamed"
 ```
 
 ## What it supports
@@ -146,8 +148,11 @@ example, and the two traps worth knowing about.
 
 - **Writes go through the CLI, not the mount.** `afs put`/`afs mkdir` create
   files and directories on scratch copies (never fixtures); `put` over a live
-  file truncates and rewrites it (fopen "w" semantics, grow/shrink/empty). The
-  FUSE mount stays read-only and never writes. No rename or delete yet.
+  file truncates and rewrites it (fopen "w" semantics, grow/shrink/empty);
+  `afs rm` deletes files and empty dirs; `afs mv` renames/moves within one
+  volume (never across partitions). The FUSE mount stays read-only and never
+  writes. No rename across partitions, no link handling, no partial-range
+  writes yet.
 - **Directory hard links** are exposed as `ENOTDIR` rather than traversed —
   a hard-linked directory is a cycle the kernel dentry cache cannot represent.
   They are still listed.

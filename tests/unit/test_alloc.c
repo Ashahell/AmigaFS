@@ -246,6 +246,115 @@ static void test_mkdir_and_nested_create(void) {
     free(img);
 }
 
+/* Delete + rename (M14 RED): entry unlinked from its chain, storage freed,
+ * cache record dropped, bitmap exact. Non-empty dirs, links, and moves into
+ * the moved subtree refuse with named reasons (ADFlib refuses the same set:
+ * adfRemoveEntry rejects non-empty dirs and non-file/dir types). */
+static void test_delete_file_frees_blocks(void) {
+    uint8_t *img = build_writable_img();
+    afs_volume_t *v = NULL;
+    uint32_t hdr = 0;
+    static uint8_t data[3000];
+    size_t i;
+    afs_dirent_t e;
+    uint8_t map[512];
+    uint32_t used_before = 0, used_after = 0, b;
+    for (i = 0; i < sizeof data; i++) data[i] = (uint8_t)(i & 0xFF);
+    CHECK(img != NULL, "image allocated");
+    CHECK_EQ_U(afs_volume_open_memory(img, (size_t)IMG_BLOCKS * 512, 512,
+                                      &v, NULL, 0), 0, "volume opens");
+    CHECK_EQ_U(afs_bitmap_read(v, map, sizeof map), 1, "bitmap reads");
+    for (b = 0; b < IMG_BLOCKS; b++)
+        if (!afs_bitmap_test(map, b)) used_before++;
+    CHECK_EQ_U(afs_file_create(v, IMG_ROOT, "gone", 4, &hdr, NULL, 0), 0, "create succeeds");
+    CHECK_EQ_U(afs_file_write_all(v, hdr, data, sizeof data, NULL, 0), 0, "write 3000 bytes");
+    CHECK_EQ_U(afs_file_delete(v, IMG_ROOT, "gone", 4, NULL, 0), 0, "delete succeeds");
+    CHECK(afs_dir_lookup(v, IMG_ROOT, "gone", 4, &e) != 0, "deleted name no longer resolves");
+    CHECK_EQ_U(afs_bitmap_read(v, map, sizeof map), 1, "bitmap rereads");
+    for (b = 0; b < IMG_BLOCKS; b++)
+        if (!afs_bitmap_test(map, b)) used_after++;
+    CHECK_EQ_U(used_after, used_before, "bitmap back to baseline: header+6 data freed");
+    /* the freed header block itself is reusable storage again */
+    {
+        uint32_t re = 0;
+        CHECK_EQ_U(afs_file_create(v, IMG_ROOT, "back", 4, &hdr, NULL, 0), 0, "recreate succeeds");
+        CHECK_EQ_U(afs_alloc_block(v, &re, NULL, 0), 0, "alloc succeeds");
+        (void)re;
+    }
+    afs_volume_close(v);
+    free(img);
+}
+
+static void test_rmdir_and_refusals(void) {
+    uint8_t *img = build_writable_img();
+    afs_volume_t *v = NULL;
+    uint32_t sub = 0, hdr = 0;
+    uint8_t one = 0x55;
+    CHECK(img != NULL, "image allocated");
+    CHECK_EQ_U(afs_volume_open_memory(img, (size_t)IMG_BLOCKS * 512, 512,
+                                      &v, NULL, 0), 0, "volume opens");
+    CHECK_EQ_U(afs_dir_mkdir(v, IMG_ROOT, "dd", 2, &sub, NULL, 0), 0, "mkdir succeeds");
+    CHECK_EQ_U(afs_file_create(v, sub, "f", 1, &hdr, NULL, 0), 0, "create inside succeeds");
+    CHECK_EQ_U(afs_file_write_all(v, hdr, &one, 1, NULL, 0), 0, "write 1 byte");
+    CHECK(afs_dir_rmdir(v, IMG_ROOT, "dd", 2, NULL, 0) != 0, "non-empty dir refused");
+    CHECK_EQ_U(afs_file_delete(v, sub, "f", 1, NULL, 0), 0, "empty it first");
+    CHECK_EQ_U(afs_dir_rmdir(v, IMG_ROOT, "dd", 2, NULL, 0), 0, "empty dir removed");
+    {
+        afs_dirent_t e;
+        CHECK(afs_dir_lookup(v, IMG_ROOT, "dd", 2, &e) != 0, "removed dir no longer resolves");
+    }
+    CHECK(afs_dir_rmdir(v, IMG_ROOT, "dd", 2, NULL, 0) != 0, "double rmdir refused");
+    afs_volume_close(v);
+    free(img);
+}
+
+static void test_rename_within_and_across(void) {
+    uint8_t *img = build_writable_img();
+    afs_volume_t *v = NULL;
+    uint32_t hdr = 0, d1 = 0, d2 = 0;
+    uint8_t payload[100];
+    void *got = NULL;
+    size_t gotlen = 0, i;
+    afs_dirent_t e;
+    for (i = 0; i < sizeof payload; i++) payload[i] = (uint8_t)(0xE0 - i);
+    CHECK(img != NULL, "image allocated");
+    CHECK_EQ_U(afs_volume_open_memory(img, (size_t)IMG_BLOCKS * 512, 512,
+                                      &v, NULL, 0), 0, "volume opens");
+    CHECK_EQ_U(afs_dir_mkdir(v, IMG_ROOT, "d1", 2, &d1, NULL, 0), 0, "mkdir d1");
+    CHECK_EQ_U(afs_dir_mkdir(v, IMG_ROOT, "d2", 2, &d2, NULL, 0), 0, "mkdir d2");
+    CHECK_EQ_U(afs_file_create(v, d1, "a", 1, &hdr, NULL, 0), 0, "create a in d1");
+    CHECK_EQ_U(afs_file_write_all(v, hdr, payload, sizeof payload, NULL, 0), 0, "write payload");
+    /* same-dir rename: content follows the name, old name dies */
+    CHECK_EQ_U(afs_dir_rename(v, d1, "a", 1, d1, "b", 1, NULL, 0), 0, "rename a->b succeeds");
+    CHECK(afs_dir_lookup(v, d1, "a", 1, &e) != 0, "old name no longer resolves");
+    CHECK_EQ_U(afs_dir_lookup(v, d1, "b", 1, &e), 0, "new name resolves");
+    CHECK_EQ_U(afs_file_read_all(v, d1, "b", 1, &got, &gotlen), 0, "reread succeeds");
+    CHECK_EQ_U(gotlen, sizeof payload, "length intact across rename");
+    CHECK(got && memcmp(got, payload, sizeof payload) == 0, "bytes intact across rename");
+    free(got); got = NULL;
+    /* move across directories */
+    CHECK_EQ_U(afs_dir_rename(v, d1, "b", 1, d2, "c", 1, NULL, 0), 0, "move d1/b -> d2/c succeeds");
+    CHECK(afs_dir_lookup(v, d1, "b", 1, &e) != 0, "source gone after move");
+    CHECK_EQ_U(afs_file_read_all(v, d2, "c", 1, &got, &gotlen), 0, "reread at destination");
+    CHECK(got && memcmp(got, payload, sizeof payload) == 0, "bytes intact across move");
+    free(got); got = NULL;
+    /* onto an existing name: refused, victim untouched */
+    CHECK(afs_dir_rename(v, d2, "c", 1, IMG_ROOT, "d1", 2, NULL, 0) != 0, "rename onto existing refused");
+    CHECK_EQ_U(afs_dir_lookup(v, d2, "c", 1, &e), 0, "victim still resolves");
+    /* a directory moved into its own subtree would cycle: refused, both the
+     * direct self-move and the deeper descendant case (which needs the
+     * walk-up, not just an equality check) */
+    {
+        uint32_t sub = 0;
+        CHECK_EQ_U(afs_dir_mkdir(v, d1, "sub", 3, &sub, NULL, 0), 0, "mkdir d1/sub");
+        CHECK(afs_dir_rename(v, IMG_ROOT, "d1", 2, d1, "d1", 2, NULL, 0) != 0, "self-move refused");
+        CHECK(afs_dir_rename(v, IMG_ROOT, "d1", 2, sub, "moved", 5, NULL, 0) != 0, "move into own subtree refused");
+        CHECK_EQ_U(afs_dir_lookup(v, IMG_ROOT, "d1", 2, &e), 0, "d1 still at root after refused moves");
+    }
+    afs_volume_close(v);
+    free(img);
+}
+
 int main(void) {
     printf("alloc/write\n");
     test_write_backend_memory();
@@ -255,5 +364,8 @@ int main(void) {
     test_overwrite_grow_shrink_empty();
     test_empty_file_is_header_only();
     test_mkdir_and_nested_create();
+    test_delete_file_frees_blocks();
+    test_rmdir_and_refusals();
+    test_rename_within_and_across();
     TEST_REPORT();
 }

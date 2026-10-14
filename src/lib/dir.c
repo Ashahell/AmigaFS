@@ -326,11 +326,14 @@ static size_t dircache_find(const uint8_t *blk, size_t bs, uint32_t header) {
     return 0;
 }
 
-static void dircache_write_rec(uint8_t *at, const afs_dircache_rec_t *r) {
+static void dircache_write_rec(uint8_t *at, const afs_dircache_rec_t *r,
+                               const char *comment, size_t commentlen) {
     /* bounded length without POSIX strnlen (strict C99): the name field is
      * NUL-terminated by both the parser and our own constructors. */
     size_t nl = 0;
     while (nl < 30 && r->name[nl]) nl++;
+    if (commentlen > 79) commentlen = 79;   /* format maximum (m11) */
+    if (!comment) commentlen = 0;
     put_be32(at + 0, r->header);
     put_be32(at + 4, r->size);
     put_be32(at + 8, r->protect);
@@ -342,23 +345,27 @@ static void dircache_write_rec(uint8_t *at, const afs_dircache_rec_t *r) {
     at[22] = r->sec_type;
     at[23] = (uint8_t)nl;
     memcpy(at + 24, r->name, nl);
-    /* our writes carry no comment: length 0 at the comment slot */
-    at[24 + nl] = 0;
+    at[24 + nl] = (uint8_t)commentlen;
+    if (commentlen) memcpy(at + 25 + nl, comment, commentlen);
 }
 
 int afs_dircache_upsert(afs_volume_t *v, uint32_t dirblk,
                         const afs_dircache_rec_t *rec,
+                        const char *comment, size_t commentlen,
                         char *errbuf, size_t errlen) {
     size_t bs;
     uint8_t *dir = NULL, *cb = NULL;
-    uint32_t cur, steps = 0;
+    uint32_t cur;
     uint32_t limit;
+    size_t cl;
     int rc = -1;
 
     if (!v || !rec) { set_err(errbuf, errlen, "bad arguments"); return -1; }
     if (!afs_volume_has_dircache(v)) return 0;   /* no cache: nothing to do */
     bs = afs_volume_block_size(v);
     limit = afs_volume_block_count(v);
+    cl = (comment && commentlen) ? commentlen : 0;
+    if (cl > 79) cl = 79;   /* format maximum (m11) */
     dir = malloc(bs);
     cb = malloc(bs);
     if (!dir || !cb) { set_err(errbuf, errlen, "out of memory"); goto out; }
@@ -377,7 +384,7 @@ int afs_dircache_upsert(afs_volume_t *v, uint32_t dirblk,
         put_be32(cb + 8, dirblk);
         put_be32(cb + 12, 0);
         put_be32(cb + 16, 0);
-        dircache_write_rec(cb + 24, rec);
+        dircache_write_rec(cb + 24, rec, comment, cl);
         put_be32(cb + 12, 1);
         put_be32(cb + 20, afs_block_checksum(cb, bs, 20));
         if (afs_volume_write_block(v, nb, cb, bs) != 0) {
@@ -392,57 +399,74 @@ int afs_dircache_upsert(afs_volume_t *v, uint32_t dirblk,
         rc = 0;
         goto out;
     }
-    /* walk to the last cache block */
-    for (;;) {
-        uint32_t next;
-        if (cur == 0 || cur >= limit || steps++ > 64) {
-            set_err(errbuf, errlen, "dir-cache chain corrupt");
-            goto out;
-        }
-        if (afs_volume_read_block(v, cur, cb, bs) != 0) {
-            set_err(errbuf, errlen, "dir-cache chain corrupt");
-            goto out;
-        }
-        if (afs_block_kind(cb, bs) != AFS_BLOCK_DIRCACHE) {
-            set_err(errbuf, errlen, "dir-cache chain corrupt");
-            goto out;
-        }
-        next = be32(cb + 16);
-        if (next == 0) break;
-        cur = next;
-    }
+    /* drop any record for this header first (upsert, not append-blindly),
+     * then append to the last block -- or chain a new one when full */
     {
-        size_t at = dircache_find(cb, bs, rec->header);
-        if (at) {
-            /* patch size + timestamp in place; comments and unknown bytes
-             * survive byte-for-byte (m11's commented entries live here) */
-            put_be32(cb + at + 4, rec->size);
-            cb[at + 16] = (uint8_t)(rec->days >> 8);
-            cb[at + 17] = (uint8_t)rec->days;
-            cb[at + 18] = (uint8_t)(rec->mins >> 8);
-            cb[at + 19] = (uint8_t)rec->mins;
-            cb[at + 20] = (uint8_t)(rec->ticks >> 8);
-            cb[at + 21] = (uint8_t)rec->ticks;
-            put_be32(cb + 20, afs_block_checksum(cb, bs, 20));
-            if (afs_volume_write_block(v, cur, cb, bs) != 0) {
-                set_err(errbuf, errlen, "cannot refresh cache block");
+        uint32_t w = cur, ws = 0;
+        for (;;) {
+            size_t at;
+            if (w == 0 || w >= limit || ws++ > 64) {
+                set_err(errbuf, errlen, "dir-cache chain corrupt");
                 goto out;
             }
-            rc = 0;
-            goto out;
+            if (afs_volume_read_block(v, w, cb, bs) != 0 ||
+                afs_block_kind(cb, bs) != AFS_BLOCK_DIRCACHE) {
+                set_err(errbuf, errlen, "dir-cache chain corrupt");
+                goto out;
+            }
+            at = dircache_find(cb, bs, rec->header);
+            if (at) {
+                /* compact the tail down over it. Bounds first, bytes second:
+                 * `at` names a matching header, not a well-formed record, so
+                 * every step below is clamped to the block before it reads. */
+                size_t onl = 0, ocl = 0, ocl_off, osz, rsz, tail;
+                while (onl < 30 && at + 24 + onl < bs && cb[at + 24 + onl])
+                    onl++;
+                ocl_off = at + 24 + onl;
+                if (ocl_off < bs) {
+                    ocl = cb[ocl_off];
+                    if (ocl > 80) ocl = 0;
+                }
+                osz = dircache_rec_size(onl, ocl, bs, at);
+                rsz = (at + osz <= bs) ? osz : bs - at;
+                tail = at + rsz;
+                if (tail < bs)
+                    memmove(cb + at, cb + tail, bs - tail);
+                /* stale bytes always occupy the last rsz bytes now -- whether
+                 * the tail moved down or the dropped record already ran to
+                 * the end of the block */
+                memset(cb + bs - rsz, 0, rsz);
+                {
+                    uint32_t nb = be32(cb + 12);
+                    put_be32(cb + 12, nb > 0 ? nb - 1 : 0);
+                }
+                put_be32(cb + 20, afs_block_checksum(cb, bs, 20));
+                if (afs_volume_write_block(v, w, cb, bs) != 0) {
+                    set_err(errbuf, errlen, "cannot drop cache record");
+                    goto out;
+                }
+            }
+            if (be32(cb + 16) == 0) { cur = w; break; }
+            w = be32(cb + 16);
         }
+    }
+    /* re-read the last block (the loop above leaves `cb` holding some block,
+     * not necessarily the last) and append */
+    if (afs_volume_read_block(v, cur, cb, bs) != 0) {
+        set_err(errbuf, errlen, "dir-cache chain corrupt");
+        goto out;
     }
     {
         size_t nl = 0, need, end = dircache_end(cb, bs);
         uint32_t nb = be32(cb + 12);
         while (nl < 30 && rec->name[nl]) nl++;
-        need = dircache_rec_size(nl, 0, bs, end);
+        need = dircache_rec_size(nl, cl, bs, end);
         /* records_nb is untrusted on read; on write we are the author, and a
          * block that would exceed the parser's clamp ((bsize-24)/26, 64 max)
          * must chain instead of growing silently-unreadable records */
         if (end && end + need <= bs && nb + 1 <= 64 &&
             nb + 1 <= (bs - 24) / 26) {
-            dircache_write_rec(cb + end, rec);
+            dircache_write_rec(cb + end, rec, comment, cl);
             put_be32(cb + 12, nb + 1);
             put_be32(cb + 20, afs_block_checksum(cb, bs, 20));
             if (afs_volume_write_block(v, cur, cb, bs) != 0) {
@@ -463,15 +487,12 @@ int afs_dircache_upsert(afs_volume_t *v, uint32_t dirblk,
         put_be32(cb + 8, dirblk);
         put_be32(cb + 12, 1);
         put_be32(cb + 16, 0);
-        dircache_write_rec(cb + 24, rec);
+        dircache_write_rec(cb + 24, rec, comment, cl);
         put_be32(cb + 20, afs_block_checksum(cb, bs, 20));
         if (afs_volume_write_block(v, nb2, cb, bs) != 0) {
             set_err(errbuf, errlen, "cannot write cache block");
             goto out;
         }
-        /* link: re-read is unnecessary, `cb` still holds the prev block?
-         * No -- cb was just overwritten. Re-read prev... `cur` IS the prev
-         * (loop broke with next == 0), so re-read it. */
         if (afs_volume_read_block(v, cur, cb, bs) != 0) {
             set_err(errbuf, errlen, "cannot relink cache chain");
             goto out;
@@ -554,8 +575,446 @@ int afs_dir_mkdir(afs_volume_t *v, uint32_t dirblock,
     rec.days = (int16_t)dd; rec.mins = (int16_t)mm; rec.ticks = (int16_t)tt;
     rec.sec_type = (uint8_t)AFS_ST_USERDIR;
     memcpy(rec.name, name, namelen < 30 ? namelen : 30);
-    if (afs_dircache_upsert(v, dirblock, &rec, errbuf, errlen) != 0) return -1;
+    if (afs_dircache_upsert(v, dirblock, &rec, NULL, 0, errbuf, errlen) != 0) return -1;
 
     *dir_out = nb;
+    return 0;
+}
+
+int afs_dir_unlink(afs_volume_t *v, uint32_t dirblock,
+                   const char *name, size_t namelen, uint32_t *block_out,
+                   char *errbuf, size_t errlen) {
+    size_t bs;
+    uint8_t *dir = NULL, *prevb = NULL;
+    uint32_t ht, bucket, slot, cur, prev = 0;
+    uint32_t limit, steps = 0;
+    int rc = -1;
+
+    if (!v || !name || !block_out) {
+        set_err(errbuf, errlen, "bad arguments");
+        return -1;
+    }
+    bs = afs_volume_block_size(v);
+    limit = afs_volume_block_count(v);
+    dir = malloc(bs);
+    prevb = malloc(bs);
+    if (!dir || !prevb) { set_err(errbuf, errlen, "out of memory"); goto out; }
+    if (afs_volume_read_block(v, dirblock, dir, bs) != 0) {
+        set_err(errbuf, errlen, "cannot read directory %u", dirblock);
+        goto out;
+    }
+    if (dir_ht_size(dir, bs, &ht) != 0) {
+        set_err(errbuf, errlen, "directory %u has no usable hash table", dirblock);
+        goto out;
+    }
+    bucket = afs_hash(name, namelen, ht, afs_volume_flags(v));
+    slot = be32(dir + 24 + 4 * bucket);
+    /* strict walk with predecessor: every pointer must be in range and
+     * readable, like the link path -- unlinking around corruption would hide
+     * it behind a successful return */
+    cur = slot;
+    for (;;) {
+        uint8_t *eb;
+        char nm[AFS_NAME_MAX];
+        uint32_t next;
+        if (cur == 0) {
+            set_err(errbuf, errlen, "'%.*s' not found", (int)namelen, name);
+            goto out;
+        }
+        if (cur >= limit || steps++ > limit) {
+            set_err(errbuf, errlen, "hash chain corrupt in directory %u", dirblock);
+            goto out;
+        }
+        eb = malloc(bs);
+        if (!eb) { set_err(errbuf, errlen, "out of memory"); goto out; }
+        if (afs_volume_read_block(v, cur, eb, bs) != 0) {
+            free(eb);
+            set_err(errbuf, errlen, "hash chain corrupt in directory %u", dirblock);
+            goto out;
+        }
+        entry_name(eb, bs, nm, sizeof nm);
+        next = be32(eb + bs - 16);
+        free(eb);
+        if (afs_name_equal(nm, strlen(nm), name, namelen, afs_volume_flags(v)))
+            break;
+        if (next == cur) {
+            set_err(errbuf, errlen, "hash chain corrupt in directory %u", dirblock);
+            goto out;
+        }
+        prev = cur;
+        cur = next;
+    }
+    /* splice out: bucket head or predecessor link, then restamp */
+    if (prev == 0) {
+        uint8_t *eb = malloc(bs);
+        uint32_t next;
+        if (!eb) { set_err(errbuf, errlen, "out of memory"); goto out; }
+        if (afs_volume_read_block(v, cur, eb, bs) != 0) {
+            free(eb);
+            set_err(errbuf, errlen, "cannot read entry %u", cur);
+            goto out;
+        }
+        next = be32(eb + bs - 16);
+        free(eb);
+        put_be32(dir + 24 + 4 * bucket, next);
+        if (write_header_block(v, dirblock, dir, bs) != 0) {
+            set_err(errbuf, errlen, "cannot write directory %u", dirblock);
+            goto out;
+        }
+    } else {
+        if (afs_volume_read_block(v, prev, prevb, bs) != 0) {
+            set_err(errbuf, errlen, "cannot read chain block %u", prev);
+            goto out;
+        }
+        {
+            uint8_t *eb = malloc(bs);
+            uint32_t next;
+            if (!eb) { set_err(errbuf, errlen, "out of memory"); goto out; }
+            if (afs_volume_read_block(v, cur, eb, bs) != 0) {
+                free(eb);
+                set_err(errbuf, errlen, "cannot read entry %u", cur);
+                goto out;
+            }
+            next = be32(eb + bs - 16);
+            free(eb);
+            put_be32(prevb + bs - 16, next);
+        }
+        if (write_header_block(v, prev, prevb, bs) != 0) {
+            set_err(errbuf, errlen, "cannot relink chain in %u", dirblock);
+            goto out;
+        }
+    }
+    *block_out = cur;
+    rc = 0;
+out:
+    free(dir);
+    free(prevb);
+    return rc;
+}
+
+int afs_dircache_del(afs_volume_t *v, uint32_t dirblock, uint32_t header,
+                     char *errbuf, size_t errlen) {
+    size_t bs;
+    uint8_t *dir = NULL, *cb = NULL;
+    uint32_t cur, steps = 0, limit;
+
+    if (!v) { set_err(errbuf, errlen, "bad arguments"); return -1; }
+    if (!afs_volume_has_dircache(v)) return 0;
+    bs = afs_volume_block_size(v);
+    limit = afs_volume_block_count(v);
+    dir = malloc(bs);
+    cb = malloc(bs);
+    if (!dir || !cb) { set_err(errbuf, errlen, "out of memory"); goto out; }
+    if (afs_volume_read_block(v, dirblock, dir, bs) != 0) {
+        set_err(errbuf, errlen, "cannot read directory %u", dirblock);
+        goto out;
+    }
+    cur = be32(dir + bs - 8);
+    while (cur != 0) {
+        size_t at, onl = 0, ocl = 0, ocl_off, osz, rsz, tail;
+        uint32_t nb;
+        if (cur >= limit || steps++ > 64) {
+            set_err(errbuf, errlen, "dir-cache chain corrupt");
+            goto out;
+        }
+        if (afs_volume_read_block(v, cur, cb, bs) != 0 ||
+            afs_block_kind(cb, bs) != AFS_BLOCK_DIRCACHE) {
+            set_err(errbuf, errlen, "dir-cache chain corrupt");
+            goto out;
+        }
+        at = dircache_find(cb, bs, header);
+        if (at) {
+            /* same bounded compaction as upsert's drop path */
+            while (onl < 30 && at + 24 + onl < bs && cb[at + 24 + onl]) onl++;
+            ocl_off = at + 24 + onl;
+            if (ocl_off < bs) {
+                ocl = cb[ocl_off];
+                if (ocl > 80) ocl = 0;
+            }
+            osz = dircache_rec_size(onl, ocl, bs, at);
+            rsz = (at + osz <= bs) ? osz : bs - at;
+            tail = at + rsz;
+            if (tail < bs) {
+                memmove(cb + at, cb + tail, bs - tail);
+                memset(cb + bs - rsz, 0, rsz);
+            }
+            nb = be32(cb + 12);
+            put_be32(cb + 12, nb > 0 ? nb - 1 : 0);
+            put_be32(cb + 20, afs_block_checksum(cb, bs, 20));
+            if (afs_volume_write_block(v, cur, cb, bs) != 0) {
+                set_err(errbuf, errlen, "cannot drop cache record");
+                goto out;
+            }
+            free(dir);
+            free(cb);
+            return 0;
+        }
+        cur = be32(cb + 16);
+    }
+    free(dir);
+    free(cb);
+    return 0;   /* no record named that header: nothing to do */
+out:
+    free(dir);
+    free(cb);
+    return -1;
+}
+
+/* Read one cache record's comment bytes (for rename preservation). Empty when
+ * absent. Bounded like every other cache walk. */
+static size_t dircache_read_comment(afs_volume_t *v, uint32_t dirblock,
+                                    uint32_t header, char *out, size_t cap) {
+    size_t bs = afs_volume_block_size(v);
+    uint32_t limit = afs_volume_block_count(v);
+    uint8_t *dir = NULL, *cb = NULL;
+    uint32_t cur, steps = 0;
+    size_t got = 0;
+
+    if (!v || !out || cap == 0) return 0;
+    out[0] = '\0';
+    if (!afs_volume_has_dircache(v)) return 0;
+    dir = malloc(bs);
+    cb = malloc(bs);
+    if (!dir || !cb) { free(dir); free(cb); return 0; }
+    if (afs_volume_read_block(v, dirblock, dir, bs) != 0) goto done;
+    cur = be32(dir + bs - 8);
+    while (cur != 0) {
+        size_t at, onl = 0, ocl_off, cl;
+        if (cur >= limit || steps++ > 64) break;
+        if (afs_volume_read_block(v, cur, cb, bs) != 0) break;
+        if (afs_block_kind(cb, bs) != AFS_BLOCK_DIRCACHE) break;
+        at = dircache_find(cb, bs, header);
+        if (at) {
+            while (onl < 30 && at + 24 + onl < bs && cb[at + 24 + onl]) onl++;
+            ocl_off = at + 24 + onl;
+            if (ocl_off >= bs) break;
+            cl = cb[ocl_off];
+            if (cl > 79) cl = 79;
+            if (ocl_off + 1 + cl > bs) cl = (ocl_off + 1 < bs) ? bs - ocl_off - 1 : 0;
+            if (cl > cap - 1) cl = cap - 1;
+            if (cl) memcpy(out, cb + ocl_off + 1, cl);
+            out[cl] = '\0';
+            got = cl;
+            break;
+        }
+        cur = be32(cb + 16);
+    }
+done:
+    free(dir);
+    free(cb);
+    return got;
+}
+
+int afs_dir_rmdir(afs_volume_t *v, uint32_t dirblock,
+                  const char *name, size_t namelen,
+                  char *errbuf, size_t errlen) {
+    size_t bs;
+    uint8_t *b = NULL;
+    afs_dirent_t e;
+    uint32_t target, cur, steps = 0, limit;
+    afs_dirent_t ents[8];
+    size_t n = 0;
+
+    if (!v || !name) { set_err(errbuf, errlen, "bad arguments"); return -1; }
+    if (afs_dir_lookup(v, dirblock, name, namelen, &e) != 0) {
+        set_err(errbuf, errlen, "'%.*s' not found", (int)namelen, name);
+        return -1;
+    }
+    if (e.kind != AFS_BLOCK_DIR) {
+        set_err(errbuf, errlen, "'%.*s' is not a directory",
+                (int)namelen, name);
+        return -1;
+    }
+    target = e.block;
+    /* empty means empty: even one entry refuses (ADFlib parity) */
+    if (afs_dir_list(v, target, ents, 8, &n) != 0) {
+        set_err(errbuf, errlen, "cannot read directory '%.*s'",
+                (int)namelen, name);
+        return -1;
+    }
+    if (n != 0) {
+        set_err(errbuf, errlen, "directory '%.*s' not empty",
+                (int)namelen, name);
+        return -1;
+    }
+    {
+        uint32_t gone = 0;
+        if (afs_dir_unlink(v, dirblock, name, namelen, &gone,
+                           errbuf, errlen) != 0)
+            return -1;
+        if (gone != target) {
+            set_err(errbuf, errlen, "unlink raced lookup (internal)");
+            return -1;
+        }
+    }
+    /* free the whole cache chain (empty dirs can own blocks from deleted
+     * children), then the directory block itself */
+    bs = afs_volume_block_size(v);
+    limit = afs_volume_block_count(v);
+    b = malloc(bs);
+    if (!b) { set_err(errbuf, errlen, "out of memory"); return -1; }
+    if (afs_volume_read_block(v, target, b, bs) != 0) {
+        free(b);
+        set_err(errbuf, errlen, "cannot read directory block %u", target);
+        return -1;
+    }
+    cur = be32(b + bs - 8);
+    while (cur != 0) {
+        uint8_t *cb = malloc(bs);
+        uint32_t next;
+        if (!cb) { free(b); set_err(errbuf, errlen, "out of memory"); return -1; }
+        if (cur >= limit || steps++ > 64 ||
+            afs_volume_read_block(v, cur, cb, bs) != 0 ||
+            afs_block_kind(cb, bs) != AFS_BLOCK_DIRCACHE) {
+            free(cb); free(b);
+            set_err(errbuf, errlen, "dir-cache chain corrupt");
+            return -1;
+        }
+        next = be32(cb + 16);
+        free(cb);
+        if (afs_free_block(v, cur, errbuf, errlen) != 0) {
+            free(b);
+            return -1;
+        }
+        cur = next;
+    }
+    free(b);
+    if (afs_dircache_del(v, dirblock, target, errbuf, errlen) != 0) return -1;
+    if (afs_free_block(v, target, errbuf, errlen) != 0) return -1;
+    return 0;
+}
+
+/* True when `blk` lies on the ancestor chain of `dirblk` (or equals it):
+ * moving `blk` under `dirblk` would cycle. Bounded walk via parent fields. */
+static int is_within_subtree(afs_volume_t *v, uint32_t blk, uint32_t dirblk) {
+    size_t bs = afs_volume_block_size(v);
+    uint32_t limit = afs_volume_block_count(v);
+    uint32_t cur = dirblk, steps = 0;
+    uint8_t *b = malloc(bs);
+    if (!b) return 1;   /* fail closed: refuse the move on OOM */
+    while (cur != 0) {
+        if (cur == blk) { free(b); return 1; }
+        if (cur >= limit || steps++ > limit) break;
+        if (afs_volume_read_block(v, cur, b, bs) != 0) break;
+        /* rootblock's parent field is 0: terminates at the top */
+        cur = be32(b + bs - 12);
+    }
+    free(b);
+    return 0;
+}
+
+int afs_dir_rename(afs_volume_t *v,
+                   uint32_t src_dir, const char *oldname, size_t oldlen,
+                   uint32_t dst_dir, const char *newname, size_t newlen,
+                   char *errbuf, size_t errlen) {
+    size_t bs;
+    uint8_t *eb = NULL;
+    afs_dirent_t src, dst_dup;
+    afs_block_kind_t kind;
+    uint32_t target;
+    char comment[80];
+
+    if (!v || !oldname || !newname) {
+        set_err(errbuf, errlen, "bad arguments");
+        return -1;
+    }
+    if (!afs_name_valid(newname, newlen)) {
+        set_err(errbuf, errlen, "invalid name (1..30 bytes, no '/' or ':')");
+        return -1;
+    }
+    bs = afs_volume_block_size(v);
+    if (afs_dir_lookup(v, src_dir, oldname, oldlen, &src) != 0) {
+        set_err(errbuf, errlen, "'%.*s' not found", (int)oldlen, oldname);
+        return -1;
+    }
+    target = src.block;
+    kind = (afs_block_kind_t)src.kind;
+    if (kind != AFS_BLOCK_FILE && kind != AFS_BLOCK_DIR) {
+        set_err(errbuf, errlen, "cannot move links yet (only files/dirs)");
+        return -1;
+    }
+    /* same name in the same directory: no-op success (ADFlib parity) */
+    if (src_dir == dst_dir &&
+        afs_name_equal(oldname, oldlen, newname, newlen,
+                       afs_volume_flags(v)))
+        return 0;
+    /* occupied destination: refuse with the victim untouched */
+    if (afs_dir_lookup(v, dst_dir, newname, newlen, &dst_dup) == 0) {
+        set_err(errbuf, errlen, "'%.*s' already exists", (int)newlen, newname);
+        return -1;
+    }
+    /* a directory moved under itself would cycle */
+    if (kind == AFS_BLOCK_DIR && is_within_subtree(v, target, dst_dir)) {
+        set_err(errbuf, errlen, "cannot move a directory into itself");
+        return -1;
+    }
+    /* preserve any comment across the move (xdftool-written files carry them) */
+    comment[0] = '\0';
+    dircache_read_comment(v, src_dir, target, comment, sizeof comment);
+
+    eb = malloc(bs);
+    if (!eb) { set_err(errbuf, errlen, "out of memory"); return -1; }
+    if (afs_volume_read_block(v, target, eb, bs) != 0) {
+        free(eb);
+        set_err(errbuf, errlen, "cannot read entry %u", target);
+        return -1;
+    }
+    /* rewrite name + parent in place, then rechain */
+    eb[bs - 80] = (uint8_t)newlen;
+    memcpy(eb + bs - 79, newname, newlen);
+    put_be32(eb + bs - 12, dst_dir);
+    put_be32(eb + bs - 16, 0);
+    put_be32(eb + 20, afs_block_checksum(eb, bs, 20));
+    {
+        uint32_t gone = 0;
+        if (afs_dir_unlink(v, src_dir, oldname, oldlen, &gone,
+                           errbuf, errlen) != 0) {
+            free(eb);
+            return -1;
+        }
+        if (gone != target) {
+            free(eb);
+            set_err(errbuf, errlen, "unlink raced lookup (internal)");
+            return -1;
+        }
+    }
+    if (afs_volume_write_block(v, target, eb, bs) != 0) {
+        /* entry is unlinked but unwritten: the name is gone while the block
+         * still carries the old one. No transaction spans this; report it. */
+        free(eb);
+        set_err(errbuf, errlen, "cannot rewrite entry %u", target);
+        return -1;
+    }
+    free(eb);
+    if (afs_dir_link_entry(v, dst_dir, target, errbuf, errlen) != 0) return -1;
+    {
+        afs_dircache_rec_t rec;
+        uint8_t *hb = malloc(bs);
+        memset(&rec, 0, sizeof rec);
+        if (!hb) { set_err(errbuf, errlen, "out of memory"); return -1; }
+        /* size + timestamp travel with the entry */
+        if (afs_volume_read_block(v, target, hb, bs) != 0) {
+            free(hb);
+            set_err(errbuf, errlen, "cannot reread entry %u", target);
+            return -1;
+        }
+        rec.header = target;
+        rec.size = (kind == AFS_BLOCK_FILE) ? be32(hb + bs - 188) : 0;
+        rec.protect = be32(hb + bs - 192);
+        rec.uid = be16(hb + bs - 196);
+        rec.gid = be16(hb + bs - 194);
+        rec.days = (int16_t)be16(hb + bs - 92);
+        rec.mins = (int16_t)be16(hb + bs - 88);
+        rec.ticks = (int16_t)be16(hb + bs - 84);
+        rec.sec_type = (kind == AFS_BLOCK_FILE) ? (uint8_t)AFS_ST_FILE
+                                                : (uint8_t)AFS_ST_USERDIR;
+        memcpy(rec.name, newname, newlen < 30 ? newlen : 30);
+        free(hb);
+        if (afs_dircache_del(v, src_dir, target, errbuf, errlen) != 0) return -1;
+        if (afs_dircache_upsert(v, dst_dir, &rec, comment[0] ? comment : NULL,
+                                comment[0] ? strlen(comment) : 0,
+                                errbuf, errlen) != 0)
+            return -1;
+    }
     return 0;
 }

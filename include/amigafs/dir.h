@@ -61,13 +61,23 @@ int afs_dir_link_entry(afs_volume_t *v, uint32_t dirblock, uint32_t entryblock,
                        char *errbuf, size_t errlen);
 
 /* Insert-or-refresh one dir-cache record for `dirblock` (no-op on non-DIRC
- * volumes). A record for the same header block is patched in place (size and
- * timestamp only -- comments and unknown bytes are preserved byte-for-byte);
- * otherwise the record is appended, allocating and linking a new cache block
- * when the last one is full. Every touched block is restamped. */
+ * volumes). An existing record for the same header is dropped and the new one
+ * appended (possibly chaining a new block): no in-place patching, so a rename
+ * cannot strand half a record. `comment` (NULL/0 = none, clamped to 79) is
+ * stored with the record, which is how renames preserve comments. Every
+ * touched block is restamped. */
 int afs_dircache_upsert(afs_volume_t *v, uint32_t dirblock,
                         const afs_dircache_rec_t *rec,
+                        const char *comment, size_t commentlen,
                         char *errbuf, size_t errlen);
+
+/* Drop one dir-cache record by entry-block header, compacting the block
+ * (later records slide down) and decrementing the count. Empty blocks stay
+ * chained (valid, just wasteful -- matches ADFlib's tolerance, not its leak:
+ * rmdir frees the whole chain explicitly). No-op on non-DIRC volumes and
+ * when no record names that header. */
+int afs_dircache_del(afs_volume_t *v, uint32_t dirblock, uint32_t header,
+                     char *errbuf, size_t errlen);
 
 /* Create a subdirectory. Refuses invalid names, duplicates (by the same
  * case-insensitive lookup a later `ls` will use), and unwritable parents with
@@ -75,5 +85,36 @@ int afs_dircache_upsert(afs_volume_t *v, uint32_t dirblock,
 int afs_dir_mkdir(afs_volume_t *v, uint32_t dirblock,
                   const char *name, size_t namelen, uint32_t *dir_out,
                   char *errbuf, size_t errlen);
+
+/* Unlink a name from its directory's hash chain (bucket head or chain
+ * relink), restamping every touched block. The entry block itself is NOT
+ * freed -- the caller owns what happens to the storage. Sets *block_out to
+ * the unlinked block. Refuses missing names and corrupt chains with named
+ * reasons (linking already refused those on the way in; unlinking must not
+ * paper over them on the way out). */
+int afs_dir_unlink(afs_volume_t *v, uint32_t dirblock,
+                   const char *name, size_t namelen, uint32_t *block_out,
+                   char *errbuf, size_t errlen);
+
+/* Remove an empty subdirectory: refuse non-directories and non-empty
+ * directories with named reasons, unlink, free its whole dir-cache chain
+ * (empty dirs can still own cache blocks from deleted children), then free
+ * the directory block itself. */
+int afs_dir_rmdir(afs_volume_t *v, uint32_t dirblock,
+                  const char *name, size_t namelen,
+                  char *errbuf, size_t errlen);
+
+/* Rename/move within one volume: rewrite the entry's name+parent in place,
+ * unlink it from the source chain, append it to the destination chain with a
+ * duplicate check, and move its dir-cache record. Same name in the same
+ * directory is a no-op success (ADFlib parity). Refuses: invalid new names,
+ * missing sources, occupied destinations (victim untouched), links (ADFlib
+ * handles FILE/DIR only), and moves of a directory into its own subtree (a
+ * cycle). Cross-partition moves do not reach here -- the caller resolves
+ * volumes first and refuses those itself. */
+int afs_dir_rename(afs_volume_t *v,
+                   uint32_t src_dir, const char *oldname, size_t oldlen,
+                   uint32_t dst_dir, const char *newname, size_t newlen,
+                   char *errbuf, size_t errlen);
 
 #endif /* AMIGAFS_DIR_H */

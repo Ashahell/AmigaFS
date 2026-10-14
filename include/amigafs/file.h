@@ -117,4 +117,14 @@ int afs_file_write_all(afs_volume_t *v, uint32_t hdrblock,
                        const void *data, size_t len,
                        char *errbuf, size_t errlen);
 
+/* Delete a file by name: unlink it from its directory chain, free every data
+ * block, every extension block and the header itself, drop its dir-cache
+ * record, and leave the bitmap exact. Refuses missing names, directories
+ * (use rmdir) and links (ADFlib handles FILE/DIR only) with named reasons.
+ * Unlink happens first so a later I/O failure can only leak storage, never
+ * leave a half-linked entry. */
+int afs_file_delete(afs_volume_t *v, uint32_t dirblock,
+                    const char *name, size_t namelen,
+                    char *errbuf, size_t errlen);
+
 #endif /* AMIGAFS_FILE_H */
