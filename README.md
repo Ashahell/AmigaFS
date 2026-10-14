@@ -93,6 +93,8 @@ multiple hard links, `D` directory hard link.
 - **Files:** regular files, directories, hard links (one shared inode, real
   content), soft links (Amiga path syntax translated to a mount-relative POSIX
   path), empty files, and files spanning many extension blocks.
+- **Extended attributes:** `user.amiga.comment` carries the AmigaDOS comment;
+  nothing else is exposed, and unknown names return `ENODATA`.
 - **Verification:** `afs verify` walks the directory tree reading the hash
   table **raw** — deliberately not through the same reader the filesystem uses,
   because that reader drops bad pointers and unrecognised blocks, and those are
@@ -101,6 +103,28 @@ multiple hard links, `D` directory hard link.
   against the computed rootblock, the bitmap-valid flag, the bitmap page count
   against the volume size, blocks claimed as both bitmap and file, and each
   bitmap block's checksum. Exit status is 1 if anything is found.
+
+### Comments
+
+An AmigaDOS comment is exposed as the extended attribute `user.amiga.comment`:
+
+```sh
+getfattr -d -m - /mnt/africa/mod.And.DistantCall
+# user.amiga.comment="protracker module"
+getfattr -m - /mnt/africa/mod.And.DistantCall
+# user.amiga.comment
+```
+
+The comment lives in the **entry block** at `bsize-184`, on every volume —
+DIRC or not, file or directory. On a DIRC volume the dir cache holds a second,
+redundant copy; the reader deliberately uses the entry block, so a damaged or
+stale cache cannot lose a comment. `listxattr` advertises the attribute only for
+a non-empty comment, so "no comment" and "empty comment" stay distinguishable,
+and the value carries no trailing NUL, matching every other `user.*` attribute.
+
+The layout was verified byte-for-byte against amitools' own parsers before it
+was implemented; `docs/comment-layout.md` records the method, the worked
+example, and the two traps worth knowing about.
 
 ## Known limits
 

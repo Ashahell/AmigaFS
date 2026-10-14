@@ -215,3 +215,52 @@ int afs_read_file_by_block(afs_volume_t *v, uint32_t fileblock,
     if (len == 0) { *got = 0; return 0; }
     return read_into(v, fblk, (uint8_t *)out, offset, len, got);
 }
+
+/* The comment field's distance from the end of the block, and the format's
+ * maximum. Verified against amitools' EntryBlock._read_nac_modts, which reads
+ * it as _get_bstr(-46, 79) -- a plain absolute offset bsize - 4*46. */
+#define AFS_COMMENT_OFF 184u
+#define AFS_COMMENT_MAX 79u
+
+size_t afs_entry_comment(const uint8_t *blk, size_t bsize,
+                         char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    /* the field must lie wholly inside the block, whatever the block size */
+    if (!blk || bsize <= AFS_COMMENT_OFF) return 0;
+
+    size_t len = blk[bsize - AFS_COMMENT_OFF];
+    if (len > AFS_COMMENT_MAX) len = AFS_COMMENT_MAX;      /* corrupt length */
+    size_t room = bsize - (AFS_COMMENT_OFF - 1u);          /* data to end of blk */
+    if (len > room) len = room;                             /* never past the end */
+
+    if (len > cap - 1) len = cap - 1;                       /* never past the cap */
+    if (len) memcpy(out, blk + bsize - (AFS_COMMENT_OFF - 1u), len);
+    out[len] = '\0';
+    return len;
+}
+
+int afs_file_comment(afs_volume_t *v, uint32_t dirblock,
+                     const char *name, size_t namelen,
+                     char *out, size_t cap) {
+    if (out && cap) out[0] = '\0';
+    if (!v || !name) return -1;
+    afs_dirent_t e;
+    if (afs_dir_lookup(v, dirblock, name, namelen, &e) != 0) return -1;
+    /* a hard link resolves to its REAL entry, so both names for one inode
+     * report the same comment rather than an empty one */
+    uint32_t fblk;
+    uint8_t kind;
+    if (resolve_file_block(v, e.block, &fblk, &kind) != 0) return -1;
+
+    size_t bsize = afs_volume_block_size(v);
+    uint8_t *blk = malloc(bsize);
+    if (!blk) return -1;
+    if (afs_volume_read_block(v, fblk, blk, bsize) != 0) {
+        free(blk);
+        return -1;
+    }
+    afs_entry_comment(blk, bsize, out, cap);
+    free(blk);
+    return 0;
+}

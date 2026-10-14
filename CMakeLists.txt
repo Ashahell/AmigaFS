@@ -75,6 +75,8 @@ add_executable(m10_partition tests/oracle/m10_partition.c)
 target_link_libraries(m10_partition PRIVATE amigafs_core)
 add_executable(m10_catpart tests/oracle/m10_catpart.c)
 target_link_libraries(m10_catpart PRIVATE amigafs_core)
+add_executable(m11_comment tests/oracle/m11_comment.c)
+target_link_libraries(m11_comment PRIVATE amigafs_core)
 
 # --------------------------------------------------------------- FUSE mount ----
 find_package(PkgConfig REQUIRED)
@@ -102,7 +104,7 @@ target_link_libraries(m6_damage_probe PRIVATE amigafs_core)
 # These compare the core library against pinned external oracles (ADFlib CLI,
 # amitools) and, for M8, against a real FUSE mount. They need the fixtures and
 # the oracles present, so they are registered but skipped cleanly when not.
-set(AMIGAFS_GATES m0_gate m2_gate m3_gate m4_gate m5_gate m6_gate m7_gate m8_gate m10_gate m10_mount_gate fuzz_gate)
+set(AMIGAFS_GATES m0_gate m2_gate m3_gate m4_gate m5_gate m6_gate m7_gate m8_gate m10_gate m10_mount_gate m11_gate fuzz_gate)
 foreach(g ${AMIGAFS_GATES})
   add_test(NAME gate_${g}
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/oracle/${g}.sh)

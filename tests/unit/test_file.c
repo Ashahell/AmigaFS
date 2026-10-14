@@ -244,6 +244,67 @@ static void test_offset_and_clamp(void) {
     afs_volume_close(v);
 }
 
+/* A comment lives in the entry block at bsize-184, on EVERY volume -- DIRC or
+ * not, file or directory. The layout was verified byte-for-byte against
+ * amitools' own parser on real fixtures before any of this was written; see
+ * docs/comment-layout.md. These tests pin the BOUNDARY behaviour, which is
+ * what a hostile length byte can attack. */
+static void test_entry_comment(void) {
+    uint8_t blk[BS];
+    char out[128];
+
+    memset(blk, 0, sizeof blk);
+    put_be32(blk + 0, AFS_T_HEADER);
+    put_be32(blk + BS - 4, AFS_ST_FILE);
+    blk[BS - 80] = 4; memcpy(blk + BS - 79, "file", 4);
+
+    memset(out, 0x7E, sizeof out);            /* poison: catches stale bytes */
+    CHECK_EQ_U(afs_entry_comment(blk, BS, out, sizeof out), 0,
+               "an entry with no comment yields an empty string");
+    CHECK_EQ_U(out[0], 0, "and the result is NUL-terminated");
+
+    const char *cmt = "comment of MOON.GIF";
+    size_t n = strlen(cmt);
+    blk[BS - 184] = (uint8_t)n;
+    memcpy(blk + BS - 183, cmt, n);
+    memset(out, 0x7E, sizeof out);
+    CHECK_EQ_U(afs_entry_comment(blk, BS, out, sizeof out), n,
+               "the comment length is returned");
+    CHECK_EQ_S(out, cmt, "and the text is read from bsize-183");
+
+    /* a corrupt length byte must not run past the block, nor past the
+     * format's 79-byte maximum */
+    /* fill from the comment field to the end of the block (BS - (BS-183) = 183
+     * bytes), so a length byte claiming more than the block holds has something
+     * to run into */
+    memset(blk + BS - 183, 'x', 183);
+    blk[BS - 184] = 0xFF;
+    memset(out, 0x7E, sizeof out);
+    size_t got = afs_entry_comment(blk, BS, out, sizeof out);
+    CHECK(got <= (size_t)79, "a corrupt length byte cannot claim more than 79 bytes");
+    CHECK_EQ_U(out[got], 0, "and the result stays NUL-terminated");
+
+    /* A short output buffer truncates instead of overflowing. The caller's
+     * array is deliberately LARGER than the capacity passed, so "did it write
+     * past what I allowed" is observable rather than assumed. */
+    blk[BS - 184] = 19;
+    memcpy(blk + BS - 183, "protracker module", 17);
+    char small[16];
+    memset(small, 0x7E, sizeof small);
+    size_t sg = afs_entry_comment(blk, BS, small, 8);
+    CHECK_EQ_U(sg, 7, "a capacity of 8 yields 7 characters plus the NUL");
+    CHECK_EQ_S(small, "protrac", "and they are the leading ones");
+    CHECK_EQ_U(small[7], 0, "the NUL lands inside the allowed capacity");
+    CHECK_EQ_U(small[8], 0x7E, "nothing was written past the capacity");
+
+    /* zero capacity writes nothing at all */
+    char none[4];
+    memset(none, 0x7E, sizeof none);
+    CHECK_EQ_U(afs_entry_comment(blk, BS, none, 0), 0,
+               "zero capacity is accepted and reports nothing written");
+    CHECK_EQ_U(none[0], 0x7E, "and the caller's buffer is left untouched");
+}
+
 int main(void) {
     printf("file\n");
     test_empty_file();
@@ -251,5 +312,6 @@ int main(void) {
     test_ofs_offsets();
     test_extension_chain();
     test_offset_and_clamp();
+    test_entry_comment();
     TEST_REPORT();
 }

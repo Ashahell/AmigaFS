@@ -599,6 +599,79 @@ static void afs_ll_readlink(fuse_req_t req, fuse_ino_t ino) {
     free(raw);
 }
 
+/* ---------------------------------------------------------------------- */
+/* extended attributes: the AmigaDOS comment                               */
+/* ---------------------------------------------------------------------- */
+
+/* One attribute, and it is the only thing an AmigaDOS entry carries that a
+ * POSIX node has no other way to express. */
+#define AFS_XATTR_COMMENT "user.amiga.comment"
+
+/* Read the comment for an inode into `out`. Returns 0 on success (which
+ * includes "this entry has no comment", yielding an empty string), or non-zero
+ * if the inode is not a real entry block. */
+static int comment_for_ino(fuse_ino_t ino, char *out, size_t cap) {
+    if (out && cap) out[0] = '\0';
+    unsigned vi = 0;
+    uint32_t blkno = 0;
+    if (resolve_ino(ino, &vi, &blkno) != 0) return -1;
+    afs_volume_t *vol = g_parts[vi].vol;
+    size_t bs = afs_volume_block_size(vol);
+    uint8_t *blk = malloc(bs);
+    if (!blk) return -1;
+    if (afs_volume_read_block(vol, blkno, blk, bs) != 0) {
+        free(blk);
+        return -1;
+    }
+    afs_entry_comment(blk, bs, out, cap);
+    free(blk);
+    return 0;
+}
+
+/* An entry that has no comment must NOT advertise one: listing a name that
+ * getxattr then refuses to serve is worse than listing nothing. */
+static int ino_has_comment(fuse_ino_t ino) {
+    char c[256];
+    return comment_for_ino(ino, c, sizeof c) == 0 && c[0] != '\0';
+}
+
+static void afs_ll_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
+                            size_t size) {
+    if (strcmp(name, AFS_XATTR_COMMENT) != 0) {
+        fuse_reply_err(req, ENODATA);
+        return;
+    }
+    if (ino == INO_ROOT || IS_SYNTH(ino)) {
+        /* the mount root and the synthetic nodes are not AmigaDOS entries */
+        fuse_reply_err(req, ENODATA);
+        return;
+    }
+    char cmt[256];
+    if (comment_for_ino(ino, cmt, sizeof cmt) != 0) {
+        fuse_reply_err(req, ENODATA);
+        return;
+    }
+    /* The value is the comment's bytes with NO trailing NUL. That is what every
+     * other user.* attribute on Linux holds, and the length is already carried
+     * by the reply, so a NUL would be a surprise rather than information.
+     * listxattr only advertises the attribute for a NON-EMPTY comment, so
+     * "no comment" and "empty comment" stay distinguishable. */
+    size_t vlen = strlen(cmt);
+    if (size == 0) { fuse_reply_xattr(req, vlen); return; }
+    if (size < vlen) { fuse_reply_err(req, ERANGE); return; }
+    fuse_reply_buf(req, cmt, vlen);
+}
+
+static void afs_ll_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
+    int has = (ino != INO_ROOT && !IS_SYNTH(ino)) && ino_has_comment(ino);
+    size_t len = 0;
+    if (has) len = strlen(AFS_XATTR_COMMENT) + 1;   /* NUL-terminated list */
+    if (size == 0) { fuse_reply_xattr(req, len); return; }
+    if (size < len) { fuse_reply_err(req, ERANGE); return; }
+    if (!has) { fuse_reply_buf(req, NULL, 0); return; }
+    fuse_reply_buf(req, AFS_XATTR_COMMENT, len);
+}
+
 static void afs_ll_statfs(fuse_req_t req, fuse_ino_t ino) {
     (void)ino;
     struct statvfs sv;
@@ -626,6 +699,8 @@ static const struct fuse_lowlevel_ops afs_ll_ops = {
     .open     = afs_ll_open,
     .read     = afs_ll_read,
     .readlink = afs_ll_readlink,
+    .getxattr = afs_ll_getxattr,
+    .listxattr= afs_ll_listxattr,
     .statfs   = afs_ll_statfs,
     .init     = afs_ll_init,
 };
