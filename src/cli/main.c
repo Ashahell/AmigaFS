@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "amigafs/bitmap.h"
 #include "amigafs/dir.h"
@@ -33,6 +34,7 @@ static int usage(void) {
         "  afs cat    <image> <partition/path>\n"
         "  afs verify <image> [--strict]\n"
         "  afs bitmap <image> <partition>\n"
+        "  afs bitmap-rebuild <image> [--dry-run] [--yes]\n"
         "  afs put    <image> <partition/path> <local-file>\n"
         "  afs mkdir  <image> <partition/dir>\n"
         "  afs rm     <image> <partition/path>\n"
@@ -455,6 +457,79 @@ static int open_parent_rw(const char *image, const char *path,
     return 0;
 }
 
+/* Rebuild the allocation map by walking the tree (M18).
+ *
+ * This is the operation AmigaDOS means by bm_Flags = "TRUE if bitmap valid":
+ * a full unconditional rescan. It FREES every block the walk does not mark, so
+ * it is offered as an explicit operator action and never run automatically on
+ * open -- the allocator's refusal of a suspect map stays exactly as it was.
+ * `--dry-run` reports what would be reclaimed and writes nothing. */
+static int cmd_bitmap_rebuild(const char *image, const char *part,
+                              int dry_run, int assume_yes) {
+    afs_volume_t *v = NULL;
+    afs_bitmap_rebuild_stats_t st;
+    char err[256] = {0};
+
+    if (!dry_run && !assume_yes) {
+        fprintf(stderr, "afs: rebuilding the allocation map of %s FREES every\n", image);
+        fprintf(stderr, "afs: block the directory tree does not reference.\n");
+        fprintf(stderr, "afs: re-run with --yes to proceed, or work on a copy.\n");
+        return 2;
+    }
+
+    if (dry_run) {
+        /* The dry run must be trustworthy, and "trust me, the flag was set" is
+         * not trustworthy. Rather than add a second code path through the
+         * library -- where the dry-run branch is exactly the branch never
+         * exercised on a real write -- the dry run rebuilds a COPY and reports
+         * what that copy produced. The original is never opened for writing,
+         * so a bug in the rebuild cannot reach it. */
+        char tmp[] = "/tmp/amigafs-rebuild-XXXXXX";
+        int fd = mkstemp(tmp);
+        FILE *in, *outf;
+        char buf[65536];
+        size_t n;
+        if (fd < 0) { fprintf(stderr, "afs: cannot create a scratch copy\n"); return 1; }
+        close(fd);
+        in = fopen(image, "rb");
+        outf = fopen(tmp, "wb");
+        if (!in || !outf) {
+            fprintf(stderr, "afs: cannot copy %s\n", image);
+            if (in) fclose(in);
+            if (outf) fclose(outf);
+            remove(tmp);
+            return 1;
+        }
+        while ((n = fread(buf, 1, sizeof buf, in)) > 0)
+            if (fwrite(buf, 1, n, outf) != n) { fclose(in); fclose(outf); remove(tmp);
+                                                 fprintf(stderr, "afs: short write on the scratch copy\n"); return 1; }
+        fclose(in);
+        fclose(outf);
+
+        if (open_volume_rw(tmp, &v) != 0) { remove(tmp); return 1; }
+        if (afs_bitmap_rebuild(v, &st, err, sizeof err) != 0) {
+            fprintf(stderr, "afs: %s\n", err);
+            remove(tmp);
+            return 1;
+        }
+        remove(tmp);
+        printf("dry run: %u blocks, %u used, %u free, %u would be reclaimed\n",
+               st.total, st.used, st.free_blocks, st.reclaimed);
+        printf("%s was not modified\n", image);
+        return 0;
+    }
+
+    (void)part;
+    if (open_volume_rw(image, &v) != 0) return 1;
+    if (afs_bitmap_rebuild(v, &st, err, sizeof err) != 0) {
+        fprintf(stderr, "afs: %s\n", err);
+        return 1;
+    }
+    printf("%s: %u blocks, %u used, %u free, %u reclaimed\n",
+           image, st.total, st.used, st.free_blocks, st.reclaimed);
+    return 0;
+}
+
 static int cmd_put(const char *image, const char *path, const char *local) {
     afs_volume_t *v = NULL;
     uint32_t dirblk = 0, hdr = 0;
@@ -744,6 +819,15 @@ int main(int argc, char **argv) {
         return cmd_verify(image, strict);
     }
     if (strcmp(cmd, "bitmap") == 0)      return cmd_bitmap(image, argc > 3 ? argv[3] : NULL);
+    if (strcmp(cmd, "bitmap-rebuild") == 0) {
+        int dry = 0, yes = 0, i;
+        for (i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "--dry-run") == 0) dry = 1;
+            else if (strcmp(argv[i], "--yes") == 0) yes = 1;
+            else { fprintf(stderr, "afs: unknown option '%s'\n", argv[i]); return 2; }
+        }
+        return cmd_bitmap_rebuild(image, NULL, dry, yes);
+    }
     if (strcmp(cmd, "ls") == 0) {
         const char *dir = NULL;
         int recursive = 0, nlink = 0;

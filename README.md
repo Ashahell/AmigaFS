@@ -87,6 +87,8 @@ store them, and a silent success would be worse than a refusal.
 ./build/afs cat    disk.adf /path/to/file
 ./build/afs verify disk.adf [--strict]   # structure check; exit 1 on problems
 ./build/afs bitmap disk.adf              # free/used block summary
+./build/afs bitmap-rebuild disk.adf --dry-run   # what a rebuild would reclaim
+./build/afs bitmap-rebuild disk.adf --yes       # rebuild it (frees unreferenced blocks)
 ```
 
 `afs ls` marks each entry: `d` directory, `f` file, `l` symlink, `h` file with
@@ -176,12 +178,30 @@ example, and the two traps worth knowing about.
 - **64-bit (`ffstd64`) volumes** are refused rather than misread.
 - **Writes are refused on a volume whose bitmap cannot be trusted** — `bm_flag`
   not `-1` (AmigaDOS saying the map is suspect), or a bitmap page count the
-  volume does not need. Rebuilding the map is not implemented, so the refusal is
-  the honest answer: allocating from such a map hands out a block that is still
-  in use, and the corruption is silent because every pointer still resolves.
-  `afs verify --strict` reports the disagreement; the default check does not,
-  because a stale map is ordinary on a real Amiga disk (nine of the eleven
-  fixtures here have one and are otherwise healthy).
+  volume does not need. Allocating from such a map hands out a block that is
+  still in use, and the corruption is silent because every pointer still
+  resolves. `afs verify --strict` reports the disagreement; the default check
+  does not, because a stale map is ordinary on a real Amiga disk.
+  **The map can now be rebuilt** — see `afs bitmap-rebuild` below.
+- **Bitmap rebuild** (`afs bitmap-rebuild <image> [--dry-run] [--yes]`) is a
+  full unconditional rescan: it walks the tree, marks what it reaches, and frees
+  everything else. That is the AmigaDOS policy rather than a cautious variant of
+  it — `bm_Flags` means "TRUE if bitmap on disk is valid", and ADFlib's
+  `adfReconstructBitmap` (our pinned oracle, `adf_bitm.c:443`) does the same
+  thing: no pre-verification, no consult of `bm_Flags`, all-or-nothing if any
+  block cannot be read. The safety rests on the free pass's bounds, which
+  exclude blocks 0, 1 and the volume-tail mirror structurally.
+  It is never run automatically on open — the refusal above stays exactly as it
+  was. `--dry-run` rebuilds a **copy** and reports what would be reclaimed, so
+  the original is never opened for writing.
+  One behaviour is matched deliberately rather than "fixed": a link's own block
+  is marked, but a **soft link's target is not**, so a dangling soft link loses
+  its target on a rebuild. ADFlib does the same.
+- A stale map is ordinary on a real Amiga disk: `afs verify --strict` flags
+  **10 of the 11 fixtures**, and only `testhd.adf` is clean. That is a count of
+  fixtures *flagged*, not of fixtures with a stale map — `cache_crash.adf` is
+  flagged for being an unsupported `DOS\6` volume, and three of the fixtures
+  already fail the default check for unrelated reasons.
 - Block sizes are read from the volume; the standard 512-byte floppy geometry
   is what the fixtures cover.
 
