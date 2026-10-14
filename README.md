@@ -145,9 +145,9 @@ example, and the two traps worth knowing about.
 ## Known limits
 
 - **Writes go through the CLI, not the mount.** `afs put`/`afs mkdir` create
-  files and directories on scratch copies (never fixtures); the FUSE mount
-  stays read-only and never writes. No overwrite/truncate, rename, or delete
-  yet -- a second write to live data is refused rather than merged.
+  files and directories on scratch copies (never fixtures); `put` over a live
+  file truncates and rewrites it (fopen "w" semantics, grow/shrink/empty). The
+  FUSE mount stays read-only and never writes. No rename or delete yet.
 - **Directory hard links** are exposed as `ENOTDIR` rather than traversed —
   a hard-linked directory is a cycle the kernel dentry cache cannot represent.
   They are still listed.

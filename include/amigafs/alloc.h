@@ -32,4 +32,11 @@
 int afs_alloc_block(afs_volume_t *v, uint32_t *out,
                     char *errbuf, size_t errlen);
 
+/* Return a block to the bitmap (truncate path). The bit is set free, the page
+ * restamped and written back, and the rootblock flag danced, exactly mirroring
+ * allocation. Refuses structural blocks (< 2) and out-of-volume numbers with
+ * named reasons. */
+int afs_free_block(afs_volume_t *v, uint32_t blk,
+                   char *errbuf, size_t errlen);
+
 #endif /* AMIGAFS_ALLOC_H */

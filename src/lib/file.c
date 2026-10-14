@@ -381,78 +381,165 @@ int afs_file_write_all(afs_volume_t *v, uint32_t hdrblock,
         set_err(errbuf, errlen, "block %u is not a plain file", hdrblock);
         return -1;
     }
-    /* no overwrite yet: a second write to live data is refused, not merged */
-    if (be32(hdr + bs - 188) != 0 || be32(hdr + 8) != 0 ||
-        be32(hdr + bs - 8) != 0) {
-        free(hdr);
-        set_err(errbuf, errlen, "file already has data (no overwrite yet)");
-        return -1;
-    }
     parent = be32(hdr + bs - 12);
 
-    nblocks = (len == 0) ? 0 : (uint32_t)((len + payload - 1) / payload);
-    ntables = (nblocks <= entries) ? 1 : 1 + (uint32_t)((nblocks - entries + entries - 1) / entries);
-    if (nblocks > 0) {
-        uint32_t n_ext = ntables - 1, k;
-        size_t t;
-        ext = calloc(n_ext ? n_ext : 1, sizeof *ext);
-        dblks = malloc(nblocks * sizeof *dblks);
-        if ((n_ext && !ext) || !dblks) {
-            free(ext); free(dblks); free(hdr);
+    /* Overwrite = truncate + rewrite (fopen "w" semantics). The existing
+     * prefix blocks are REUSED (no churn, placement stable under first-free);
+     * surplus blocks are freed only after every write succeeds, and deficit
+     * blocks are allocated before anything is mutated -- so a full volume
+     * fails clean with the old content intact. */
+    {
+        uint32_t old_size = be32(hdr + bs - 188);
+        uint32_t old_n = (old_size == 0) ? 0
+            : (uint32_t)((old_size + (uint32_t)payload - 1) / (uint32_t)payload);
+        uint32_t keep, need_data, need_ext, reuse_ext, i;
+        uint32_t *old_data = NULL, *old_ext = NULL, *final_data = NULL;
+        size_t old_ext_n = 0;
+
+        nblocks = (len == 0) ? 0 : (uint32_t)((len + payload - 1) / payload);
+        ntables = (nblocks <= entries) ? 1
+            : 1 + (uint32_t)((nblocks - entries + entries - 1) / entries);
+
+        /* old data list (empty for a fresh header: collect_blocks with
+         * need 0 yields NULL, which is exactly "nothing to keep") */
+        if (old_n > 0) {
+            uint32_t cur = be32(hdr + bs - 8);
+            uint32_t guard = 0, limit = afs_volume_block_count(v);
+            /* old extension blocks, walked strictly: building on a corrupt
+             * chain would bake it in, so refuse with a name instead */
+            while (cur != 0) {
+                uint8_t *eb;
+                if (cur >= limit || guard++ > limit) {
+                    free(hdr);
+                    set_err(errbuf, errlen, "extension chain corrupt");
+                    return -1;
+                }
+                eb = malloc(bs);
+                if (!eb) {
+                    free(hdr);
+                    set_err(errbuf, errlen, "out of memory");
+                    return -1;
+                }
+                if (afs_volume_read_block(v, cur, eb, bs) != 0 ||
+                    afs_block_kind(eb, bs) != AFS_BLOCK_FILEEXT) {
+                    free(eb); free(hdr);
+                    set_err(errbuf, errlen, "extension chain corrupt");
+                    return -1;
+                }
+                cur = be32(eb + bs - 8);
+                free(eb);
+                old_ext_n++;
+                if (old_ext_n > nblocks + entries + 64) {
+                    free(hdr);
+                    set_err(errbuf, errlen, "extension chain corrupt");
+                    return -1;
+                }
+            }
+            if (old_ext_n > 0) {
+                old_ext = calloc(old_ext_n, sizeof *old_ext);
+                if (!old_ext) {
+                    free(hdr);
+                    set_err(errbuf, errlen, "out of memory");
+                    return -1;
+                }
+                cur = be32(hdr + bs - 8);
+                for (i = 0; i < old_ext_n; i++) {
+                    uint8_t *eb = malloc(bs);
+                    if (!eb) {
+                        free(old_ext); free(hdr);
+                        set_err(errbuf, errlen, "out of memory");
+                        return -1;
+                    }
+                    /* re-validated above; cannot fail here */
+                    afs_volume_read_block(v, cur, eb, bs);
+                    old_ext[i] = cur;
+                    cur = be32(eb + bs - 8);
+                    free(eb);
+                }
+            }
+            if (collect_blocks(v, hdrblock, old_n, &old_data) != 0) {
+                free(old_ext); free(hdr);
+                set_err(errbuf, errlen, "cannot read existing data blocks");
+                return -1;
+            }
+        }
+
+        keep = old_n < nblocks ? old_n : nblocks;
+        need_data = nblocks - keep;
+        reuse_ext = old_ext_n < (size_t)(ntables - 1)
+            ? (uint32_t)old_ext_n : (uint32_t)(ntables - 1);
+        need_ext = (uint32_t)(ntables - 1) - reuse_ext;
+
+        final_data = malloc(nblocks ? nblocks * sizeof *final_data : 1);
+        ext = calloc(ntables > 1 ? (size_t)(ntables - 1) : 1, sizeof *ext);
+        if (!final_data || !ext) {
+            free(final_data); free(ext); free(old_data); free(old_ext);
+            free(hdr);
             set_err(errbuf, errlen, "out of memory");
             return -1;
         }
-        /* extension blocks first, then data (uniform order both variants;
-         * placement is first-free either way and no reader cares) */
-        for (k = 0; k < n_ext; k++)
-            if (afs_alloc_block(v, &ext[k], errbuf, errlen) != 0) goto fail;
-        for (t = 0; t < nblocks; t++)
-            if (afs_alloc_block(v, &dblks[t], errbuf, errlen) != 0) goto fail;
+        for (i = 0; i < keep; i++) final_data[i] = old_data[i];
+        for (i = 0; i < reuse_ext; i++) ext[i] = old_ext[i];
+        /* deficit first: every allocation below can fail with the volume
+         * still exactly as it was */
+        for (i = 0; i < need_ext; i++)
+            if (afs_alloc_block(v, &ext[reuse_ext + i], errbuf, errlen) != 0)
+                goto fail_inner;
+        for (i = 0; i < need_data; i++)
+            if (afs_alloc_block(v, &final_data[keep + i], errbuf, errlen) != 0)
+                goto fail_inner;
+        dblks = final_data;
+        final_data = NULL;   /* owned by dblks now */
 
-        /* fill the tables REVERSED (file block j at index entries-1-j) */
-        for (t = 0; t < ntables; t++) {
+        /* fill the tables REVERSED (file block j at index entries-1-j).
+         * The table area is zeroed first: a reused table may carry stale
+         * pointers past its new (shorter) count, and salvage tools follow
+         * those. */
+        for (i = 0; i < ntables; i++) {
             uint8_t *tb;
-            size_t first = t * entries;
-            size_t count = nblocks - first;
+            size_t first = (size_t)i * entries;
+            size_t count = (size_t)nblocks - first;
             uint32_t tblk;
-            uint32_t k2;
+            size_t k2;
             if (count > entries) count = entries;
-            if (t == 0) {
+            if (i == 0) {
                 tb = hdr;
                 tblk = hdrblock;
             } else {
                 tb = calloc(1, bs);
-                if (!tb) { set_err(errbuf, errlen, "out of memory"); goto fail; }
-                tblk = ext[t - 1];
+                if (!tb) { set_err(errbuf, errlen, "out of memory"); goto fail_inner; }
+                tblk = ext[i - 1];
                 put_be32(tb + 0, AFS_T_LIST);
                 put_be32(tb + 4, tblk);
                 put_be32(tb + bs - 4, AFS_ST_FILE);
                 put_be32(tb + bs - 12, hdrblock);
-                put_be32(tb + bs - 8, (t + 1 < ntables) ? ext[t] : 0);
+                put_be32(tb + bs - 8, (i + 1 < ntables) ? ext[i] : 0);
             }
+            memset(tb + 24, 0, entries * 4);
             for (k2 = 0; k2 < count; k2++)
                 put_be32(tb + 24 + 4 * (entries - 1 - k2), dblks[first + k2]);
             put_be32(tb + 8, (uint32_t)count);
-            if (t == 0)
-                put_be32(tb + bs - 8, n_ext ? ext[0] : 0);
+            if (i == 0)
+                put_be32(tb + bs - 8, ntables > 1 ? ext[0] : 0);
             put_be32(tb + 20, afs_block_checksum(tb, bs, 20));
             if (afs_volume_write_block(v, tblk, tb, bs) != 0) {
-                if (t != 0) free(tb);
+                if (i != 0) free(tb);
                 set_err(errbuf, errlen, "cannot write file table");
-                goto fail;
+                goto fail_inner;
             }
-            if (t != 0) free(tb);
+            if (i != 0) free(tb);
         }
 
-        /* data blocks */
+        /* data blocks, fully rewritten with the new content */
         {
             const uint8_t *src = (const uint8_t *)data;
             int is_ofs = afs_volume_is_ofs(v);
+            size_t t;
             for (t = 0; t < nblocks; t++) {
                 uint8_t *db = calloc(1, bs);
                 size_t want = len - t * payload;
                 size_t have = want > payload ? payload : want;
-                if (!db) { set_err(errbuf, errlen, "out of memory"); goto fail; }
+                if (!db) { set_err(errbuf, errlen, "out of memory"); goto fail_inner; }
                 if (is_ofs) {
                     put_be32(db + 0, AFS_T_DATA);
                     put_be32(db + 4, hdrblock);
@@ -467,15 +554,34 @@ int afs_file_write_all(afs_volume_t *v, uint32_t hdrblock,
                 if (afs_volume_write_block(v, dblks[t], db, bs) != 0) {
                     free(db);
                     set_err(errbuf, errlen, "cannot write data block");
-                    goto fail;
+                    goto fail_inner;
                 }
                 free(db);
             }
         }
         /* first_data mirrors ADFlib on both variants (the FFS reader ignores
          * it, but salvage tools and byte-level oracles may not) */
-        put_be32(hdr + 16, dblks[0]);
+        put_be32(hdr + 16, nblocks ? dblks[0] : 0);
+
+        /* surplus freed LAST, after every write succeeded */
+        for (i = keep; i < old_n; i++)
+            if (afs_free_block(v, old_data[i], errbuf, errlen) != 0) goto fail_inner;
+        for (i = reuse_ext; i < old_ext_n; i++)
+            if (afs_free_block(v, old_ext[i], errbuf, errlen) != 0) goto fail_inner;
+        free(old_data);
+        free(old_ext);
+        goto write_done;
+fail_inner:
+        /* No transactions in M13b either: an I/O failure mid-rewrite can leave
+         * allocated-but-unreferenced blocks (verify reports the volume as it
+         * is). Nothing is ever half-LINKED: linking happened once at create
+         * and this function never links at all. */
+        free(old_data);
+        free(old_ext);
+        goto fail;
+write_done:;
     }
+
 
     afs_now_amiga(&dd, &mm, &tt);
     put_be32(hdr + bs - 188, (uint32_t)len);

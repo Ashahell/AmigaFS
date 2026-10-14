@@ -93,9 +93,10 @@ int afs_read_file_by_block(afs_volume_t *v, uint32_t fileblock,
 /* --- D3 write phase ---
  *
  * Create-then-write, mirroring ADFlib's open-"w" semantics without copying
- * its API: create refuses an existing name (like adfFileOpen "w"), and there
- * is deliberately no overwrite/truncate yet -- a second write to a non-empty
- * header is refused with a named reason rather than silently extended. */
+ * its API. `afs put` truncates an existing file (fopen "w"); create alone
+ * still refuses a duplicate, like adfFileOpen "w". There is deliberately no
+ * rename/delete yet, and no partial-range write: every write carries the
+ * whole new content. */
 
 /* Create an empty file in a directory: allocate a header block, write it
  * (byte_size 0, no data blocks -- the ADFlib issue #30 shape), link it into
@@ -105,12 +106,13 @@ int afs_file_create(afs_volume_t *v, uint32_t dirblock,
                     const char *name, size_t namelen, uint32_t *hdr_out,
                     char *errbuf, size_t errlen);
 
-/* Write `len` bytes into a file created by afs_file_create: allocate data
- * blocks (plus extension blocks past the first table), fill the REVERSED
- * data tables, chain OFS data blocks, stamp the header (byte_size, mtime)
- * and refresh the dir-cache record. FFS data blocks are raw; OFS data blocks
- * carry the T_DATA header. A zero-length write only stamps the header.
- * Refuses a non-empty header (no overwrite yet) with a named reason. */
+/* Write `len` bytes into a file: on a fresh header this allocates and fills;
+ * on a live file it truncates first (fopen "w" semantics -- grow, shrink, and
+ * shrink-to-empty all rebuild exact tables). FFS data blocks are raw; OFS
+ * data blocks carry the T_DATA header. A zero-length write stamps an empty
+ * header. Refuses non-plain-file blocks (directories, links) with a named
+ * reason. ENOSPC fails clean: deficit blocks are allocated before anything is
+ * mutated, so a full volume keeps the old content intact. */
 int afs_file_write_all(afs_volume_t *v, uint32_t hdrblock,
                        const void *data, size_t len,
                        char *errbuf, size_t errlen);

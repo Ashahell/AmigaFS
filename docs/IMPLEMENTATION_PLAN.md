@@ -290,7 +290,8 @@ it into `info_out: unbound variable` rather than a silent empty diff).
 ## M13 — Writes: create, write, mkdir (2026-10-14)
 
 First half of D3's deferred scope (the allocator; FUSE stays read-only, and
-there is deliberately no overwrite/truncate/rename/delete yet). New surface:
+there is deliberately no rename/delete yet -- overwrite/truncate landed in the
+second half below). New surface:
 `blockdev_open_file_rw` + a real `blockdev_write` under the identical refuse-
 never-clamp bounds rule; `afs_volume_open_window_rw` (the read-only opens are
 byte-identical, and reads can never gain write permission by a flag flip);
@@ -319,6 +320,21 @@ enshrined a false expectation — caught during the run).
 diffs. The bitmap `used` count is asserted as a relationship (ours == oracle
 + reserved-block bits as read), not a literal, because both oracles scope
 their totals two blocks smaller without saying which two.
+
+**Overwrite/truncate (same milestone, second half).** `afs_file_write_all`
+grew truncate+rewrite (fopen "w"): existing prefix blocks are reused, deficit
+blocks are allocated before anything mutates (ENOSPC keeps old content),
+tables are rebuilt with stale slots zeroed, surplus data+extension blocks are
+freed last via new `afs_free_block`, and shrink-to-empty restores the exact
+M13a header-only shape. Restarts live where block boundaries are visible (per
+engine slice / per wrapper invocation in spirit: here, the caller defines the
+block by calling once per whole new content). `afs put` truncates live files,
+including through INTL-folded names (one entry keeps its spelling, content
+replaced); put-over-directory still refused. xdftool cannot oracle this
+direction (its `write` refuses existing files, like ADFlib "w"), so the gate
+asserts round-trip through ADFlib readers + verify + bitmap accounting +
+folding resolution instead -- stated, not hidden. Unit suite grew
+grow/shrink/empty cases (80 checks).
 
 
 - **12/12** unit tests, **7/7** oracle gates, **20/20** ctest, **0** warnings under `-Wall -Wextra -Wshadow -Wconversion -Werror`.

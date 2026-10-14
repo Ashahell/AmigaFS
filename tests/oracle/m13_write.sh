@@ -131,42 +131,93 @@ else
     bad "xdftool write fixture" "xdftool makedir/write failed"
 fi
 
-# ---- 3b. INTL folding applies to creates -------------------------------
+# ---- 3b. INTL folding applies to creates AND truncates ------------------
 # ASCII case folds on EVERY variant (real AmigaDOS behavior, not just INTL),
 # so FOO-vs-foo proves nothing. The INTL-vs-plain discriminator is the
 # accented range: caf\xe9 vs CAF\xc9 fold equal if and only if INTL is on
-# (capitalch folds 224..254 except 247 only for flags >= 2). A create path
-# that folded differently from the lookup path -- or not at all -- shows
-# here, not as a mysterious duplicate later.
+# (capitalch folds 224..254 except 247 only for flags >= 2).
+# On INTL, putting the folded spelling truncates the SAME file (fopen "w"
+# through a case-insensitive lookup): one entry keeps the original spelling,
+# content is replaced, verify stays clean. A truncate path that duplicated
+# the entry (or refused) would show here.
 N1=$(printf 'caf\xe9'); N2=$(printf 'CAF\xc9')
+printf 'first\n' > "$WORK/first.txt"; printf 'second\n' > "$WORK/second.txt"
 cp "$ROOT/tests/fixtures/testofs.adf" "$WORK/case.adf"
-if "$BIN/afs" put "$WORK/case.adf" "$N1" "$WORK/small.txt" >/dev/null 2>&1; then
-    out=$("$BIN/afs" put "$WORK/case.adf" "$N2" "$WORK/small.txt" 2>&1)
-    if [ $? -ne 0 ] && printf '%s' "$out" | grep -qi "exist"; then
-        note "INTL volume folds accents on create" "ok"
+if "$BIN/afs" put "$WORK/case.adf" "$N1" "$WORK/first.txt" >/dev/null 2>&1 \
+   && "$BIN/afs" put "$WORK/case.adf" "$N2" "$WORK/second.txt" >/dev/null 2>&1; then
+    n=$("$BIN/afs" ls "$WORK/case.adf" 2>/dev/null | grep -c "caf")
+    c=$("$BIN/afs" cat "$WORK/case.adf" "$N1" 2>/dev/null)
+    if [ "$n" = "1" ] && [ "$c" = "second" ] \
+       && "$BIN/afs" verify "$WORK/case.adf" >/dev/null 2>&1; then
+        note "INTL truncate resolves folding" "one entry, new content, clean"
     else
-        bad "INTL volume folds accents on create" "rc=$? out=$(printf '%s' "$out" | head -1)"
+        bad "INTL truncate resolves folding" "entries=$n content='$c'"
     fi
 else
-    bad "INTL volume folds accents on create" "first put failed"
+    bad "INTL truncate resolves folding" "put failed"
 fi
 cp "$ROOT/tests/fixtures/blank.adf" "$WORK/case2.adf"
-if "$BIN/afs" put "$WORK/case2.adf" "$N1" "$WORK/small.txt" >/dev/null 2>&1 \
-   && "$BIN/afs" put "$WORK/case2.adf" "$N2" "$WORK/small.txt" >/dev/null 2>&1; then
-    note "plain volume keeps accents apart" "ok"
+if "$BIN/afs" put "$WORK/case2.adf" "$N1" "$WORK/first.txt" >/dev/null 2>&1 \
+   && "$BIN/afs" put "$WORK/case2.adf" "$N2" "$WORK/second.txt" >/dev/null 2>&1; then
+    n=$("$BIN/afs" ls "$WORK/case2.adf" 2>/dev/null | grep -c "caf\|CAF")
+    if [ "$n" = "2" ]; then
+        note "plain volume keeps accents apart" "ok"
+    else
+        bad "plain volume keeps accents apart" "entries=$n, want 2"
+    fi
 else
-    bad "plain volume keeps accents apart"
+    bad "plain volume keeps accents apart" "put failed"
 fi
 
-# ---- 3. negatives name the reason -------------------------------------------
+# ---- 3. put truncates (fopen "w"); mkdir duplicates refuse --------------
+# `afs put` over a live file truncates and rewrites (grow AND shrink AND to
+# empty); only genuinely unwritable targets refuse. create-alone still refuses
+# duplicates at the library level, but the CLI's job is cp-like, not
+# adfFileOpen-"w"-like -- assert the truncation, not the refusal.
 cp "$ROOT/tests/fixtures/testffs.adf" "$WORK/n.adf"
 "$BIN/afs" mkdir "$WORK/n.adf" NDIR >/dev/null 2>&1
 "$BIN/afs" put "$WORK/n.adf" NDIR/f "$WORK/small.txt" >/dev/null 2>&1
-out=$("$BIN/afs" put "$WORK/n.adf" NDIR/f "$WORK/small.txt" 2>&1)
-if [ $? -ne 0 ] && printf '%s' "$out" | grep -qi "exist"; then
-    note "duplicate create refused" "ok"
+printf '0123456789abcdef0123456789abcdef' > "$WORK/mid32.txt"
+if "$BIN/afs" put "$WORK/n.adf" NDIR/f "$WORK/mid32.txt" >/dev/null 2>&1; then
+    mkdir -p "$WORK/nu"
+    a=$(sha256sum < "$WORK/mid32.txt" | cut -d' ' -f1)
+    b=$("$BIN/afs" cat "$WORK/n.adf" NDIR/f 2>/dev/null | sha256sum | cut -d' ' -f1)
+    s=$(unadf -d "$WORK/nu" "$WORK/n.adf" >/dev/null 2>&1; stat -c%s "$WORK/nu/NDIR/f" 2>/dev/null)
+    if [ "$a" = "$b" ] && [ "$s" = "32" ]; then
+        note "put grows 13 -> 32 bytes" "${a:0:12}..."
+    else
+        bad "put grows" "want=${a:0:12} got=${b:0:12} adfls-size=$s"
+    fi
 else
-    bad "duplicate create" "rc=$? out=$(printf '%s' "$out" | head -1)"
+    bad "put grows" "second put failed"
+fi
+if "$BIN/afs" put "$WORK/n.adf" NDIR/f "$WORK/small.txt" >/dev/null 2>&1; then
+    a=$(sha256sum < "$WORK/small.txt" | cut -d' ' -f1)
+    b=$("$BIN/afs" cat "$WORK/n.adf" NDIR/f 2>/dev/null | sha256sum | cut -d' ' -f1)
+    if [ "$a" = "$b" ] && "$BIN/afs" verify "$WORK/n.adf" >/dev/null 2>&1; then
+        note "put shrinks 32 -> 13, still clean" "${a:0:12}..."
+    else
+        bad "put shrinks" "want=${a:0:12} got=${b:0:12}"
+    fi
+else
+    bad "put shrinks" "third put failed"
+fi
+if "$BIN/afs" put "$WORK/n.adf" NDIR/f "$WORK/empty.txt" >/dev/null 2>&1; then
+    mkdir -p "$WORK/ne"
+    s=$(unadf -d "$WORK/ne" "$WORK/n.adf" >/dev/null 2>&1; stat -c%s "$WORK/ne/NDIR/f" 2>/dev/null)
+    if [ "$s" = "0" ] && "$BIN/afs" verify "$WORK/n.adf" >/dev/null 2>&1; then
+        note "put truncates to empty" "size 0, verify clean"
+    else
+        bad "put truncates to empty" "adfls-size=$s"
+    fi
+else
+    bad "put truncates to empty" "put failed"
+fi
+out=$("$BIN/afs" put "$WORK/n.adf" NDIR "$WORK/small.txt" 2>&1)
+if [ $? -ne 0 ] && printf '%s' "$out" | grep -qi "exist"; then
+    note "put over a directory refused" "ok"
+else
+    bad "put over a directory" "rc=$? out=$(printf '%s' "$out" | head -1)"
 fi
 out=$("$BIN/afs" put "$WORK/n.adf" NODIR/f "$WORK/small.txt" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$out" | grep -qi "not found\|no such"; then

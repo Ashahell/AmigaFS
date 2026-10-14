@@ -172,6 +172,55 @@ static void test_empty_file_is_header_only(void) {
     free(img);
 }
 
+/* Overwrite = truncate + rewrite (fopen "w" semantics): grow, shrink, and
+ * shrink-to-empty must each leave exact content, exact tables, and exact
+ * bitmap accounting. A second write to live data used to be refused; these
+ * assert the refusal is gone AND the result is right. */
+static void test_overwrite_grow_shrink_empty(void) {
+    uint8_t *img = build_writable_img();
+    afs_volume_t *v = NULL;
+    uint32_t hdr = 0;
+    static uint8_t big[3000], small[10], mid[1000];
+    void *got = NULL;
+    size_t gotlen = 0, i;
+    uint8_t hb[512];
+    for (i = 0; i < sizeof big; i++) big[i] = (uint8_t)((i * 3 + 7) & 0xFF);
+    for (i = 0; i < sizeof small; i++) small[i] = (uint8_t)(0x40 + i);
+    for (i = 0; i < sizeof mid; i++) mid[i] = (uint8_t)((i * 11 + 3) & 0xFF);
+    CHECK(img != NULL, "image allocated");
+    CHECK_EQ_U(afs_volume_open_memory(img, (size_t)IMG_BLOCKS * 512, 512,
+                                      &v, NULL, 0), 0, "volume opens");
+    CHECK_EQ_U(afs_file_create(v, IMG_ROOT, "rw", 2, &hdr, NULL, 0), 0, "create succeeds");
+    /* grow 10 -> 3000 across the same header, then shrink, then empty */
+    CHECK_EQ_U(afs_file_write_all(v, hdr, small, sizeof small, NULL, 0), 0, "write 10");
+    CHECK_EQ_U(afs_file_write_all(v, hdr, big, sizeof big, NULL, 0), 0, "overwrite grows 10 -> 3000");
+    CHECK_EQ_U(afs_file_read_all(v, IMG_ROOT, "rw", 2, &got, &gotlen), 0, "reread succeeds");
+    CHECK_EQ_U(gotlen, sizeof big, "grown length matches");
+    CHECK(got && memcmp(got, big, sizeof big) == 0, "grown bytes identical");
+    free(got); got = NULL;
+    /* shrink 3000 -> 1000: content exact, surplus blocks freed */
+    CHECK_EQ_U(afs_file_write_all(v, hdr, mid, sizeof mid, NULL, 0), 0, "overwrite shrinks 3000 -> 1000");
+    CHECK_EQ_U(afs_file_read_all(v, IMG_ROOT, "rw", 2, &got, &gotlen), 0, "reread succeeds");
+    CHECK_EQ_U(gotlen, sizeof mid, "shrunk length matches");
+    CHECK(got && memcmp(got, mid, sizeof mid) == 0, "shrunk bytes identical");
+    free(got); got = NULL;
+    /* shrink to empty: the M13a header-only shape must come back exactly */
+    CHECK_EQ_U(afs_file_write_all(v, hdr, NULL, 0, NULL, 0), 0, "overwrite truncates to empty");
+    CHECK_EQ_U(afs_volume_read_block(v, hdr, hb, 512), 0, "header readable");
+    CHECK_EQ_U(be32(hb + 512 - 188), 0u, "byte_size back to 0");
+    CHECK_EQ_U(be32(hb + 8), 0u, "high_seq back to 0");
+    CHECK_EQ_U(be32(hb + 512 - 8), 0u, "extension unlinked");
+    CHECK_EQ_U(be32(hb + 16), 0u, "first_data back to 0");
+    /* freed blocks are reusable: the next allocation must recycle storage */
+    {
+        uint32_t re = 0xFFFFFFFFu;
+        CHECK_EQ_U(afs_alloc_block(v, &re, NULL, 0), 0, "alloc after free succeeds");
+        CHECK(re != 0 && re != IMG_ROOT && re != IMG_BM, "recycled block is ordinary storage");
+    }
+    afs_volume_close(v);
+    free(img);
+}
+
 static void test_mkdir_and_nested_create(void) {
     uint8_t *img = build_writable_img();
     afs_volume_t *v = NULL;
@@ -203,6 +252,7 @@ int main(void) {
     test_allocator_first_free();
     test_file_create_write_read();
     test_extension_chain_write();
+    test_overwrite_grow_shrink_empty();
     test_empty_file_is_header_only();
     test_mkdir_and_nested_create();
     TEST_REPORT();

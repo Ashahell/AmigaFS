@@ -484,11 +484,21 @@ static int cmd_put(const char *image, const char *path, const char *local) {
         free(data);
         return 1;
     }
+    /* fopen "w" semantics: create, else truncate the live file. A directory
+     * (or anything not a plain file) at that name keeps create's refusal. */
     if (afs_file_create(v, dirblk, base, strlen(base), &hdr, err, sizeof err) != 0) {
-        fprintf(stderr, "afs: cannot create %s: %s\n", path, err);
-        afs_volume_close(v);
-        free(data);
-        return 1;
+        afs_dirent_t e;
+        char cerr[256];
+        strncpy(cerr, err, sizeof cerr - 1);
+        cerr[sizeof cerr - 1] = '\0';
+        if (afs_dir_lookup(v, dirblk, base, strlen(base), &e) != 0 ||
+            e.kind != AFS_BLOCK_FILE) {
+            fprintf(stderr, "afs: cannot create %s: %s\n", path, cerr);
+            afs_volume_close(v);
+            free(data);
+            return 1;
+        }
+        hdr = e.block;
     }
     if (afs_file_write_all(v, hdr, data, len, err, sizeof err) != 0) {
         fprintf(stderr, "afs: cannot write %s: %s\n", path, err);
