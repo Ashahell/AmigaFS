@@ -104,7 +104,7 @@ target_link_libraries(m6_damage_probe PRIVATE amigafs_core)
 # These compare the core library against pinned external oracles (ADFlib CLI,
 # amitools) and, for M8, against a real FUSE mount. They need the fixtures and
 # the oracles present, so they are registered but skipped cleanly when not.
-set(AMIGAFS_GATES m0_gate m2_gate m3_gate m4_gate m5_gate m6_gate m7_gate m8_gate m10_gate m10_mount_gate m11_gate fuzz_gate)
+set(AMIGAFS_GATES m0_gate m2_gate m3_gate m4_gate m5_gate m6_gate m7_gate m8_gate m10_gate m10_mount_gate m11_gate fuzz_gate mount_fuzz)
 foreach(g ${AMIGAFS_GATES})
   add_test(NAME gate_${g}
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/oracle/${g}.sh)

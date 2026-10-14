@@ -90,5 +90,42 @@ if [ -n "$missing" ]; then
 fi
 echo "  all six DOS types present across the partitions"
 
+# ---- the unformatted RDB image must be refused, by name -------------------
+# a590_WD93028XA_6parts_not_formatted.hdd carries a real RDB whose partitions
+# were never formatted: no DOS id, no rootblock. It is fetched and verified by
+# fetch_fixtures.sh but was exercised by NO gate -- a fixture with a purpose
+# nobody wired up. The mount must refuse it, and the refusal must name the
+# partition and the missing rootblock: asserting only "it did not mount" would
+# be satisfied by any failure, including one in the test setup itself.
+NEG="$ROOT/tests/fixtures/a590_WD93028XA_6parts_not_formatted.hdd"
+if [ -f "$NEG" ]; then
+    neglog=$(mktemp)
+    MNT_NEG=$(mktemp -d /tmp/amigafs-m10neg.XXXXXX)
+    if "$BIN/amigafs-fuse" -f "$NEG" "$MNT_NEG" >"$neglog" 2>&1; then
+        :
+    fi
+    sleep 1
+    if grep -qF " $MNT_NEG " /proc/self/mounts 2>/dev/null; then
+        echo "  M10 gate: FAIL -- unformatted RDB image mounted; it must be refused"
+        fusermount3 -u "$MNT_NEG" 2>/dev/null
+        rm -f "$neglog"
+        rmdir "$MNT_NEG" 2>/dev/null
+        exit 1
+    fi
+    if grep -q "partition 'OFS'" "$neglog" && grep -q "not a T_HEADER/ST_ROOT rootblock" "$neglog"; then
+        echo "  unformatted RDB refused: partition named, missing rootblock stated"
+    else
+        echo "  M10 gate: FAIL -- refusal did not name the partition and the missing rootblock:"
+        sed 's/^/      /' "$neglog"
+        rm -f "$neglog"
+        rmdir "$MNT_NEG" 2>/dev/null
+        exit 1
+    fi
+    rm -f "$neglog"
+    rmdir "$MNT_NEG" 2>/dev/null
+else
+    echo "  (negative fixture absent -- run tests/fixtures/fetch_fixtures.sh)"
+fi
+
 echo "M10 gate: PASS"
 exit 0

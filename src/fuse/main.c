@@ -857,7 +857,13 @@ int main(int argc, char *argv[]) {
         close_all();
         return 1;
     }
-    fuse_daemonize(0);   /* we always run in the foreground (-f) */
+    /* fuse_daemonize(fg) DAEMONIZES WHEN fg IS ZERO. Passing 0 while the
+     * comment claimed the opposite forked the process, made the caller's PID
+     * exit immediately so `kill $!` never stopped the filesystem, and
+     * redirected stdio to /dev/null so every diagnostic after this point --
+     * including a sanitizer report -- was discarded. A detached child kept
+     * serving the mount, so `ls` still worked and nothing noticed. */
+    fuse_daemonize(1);   /* 1 == stay in the foreground; -f really means -f */
     int ret = fuse_session_loop(se);
     fuse_session_unmount(se);
     fuse_remove_signal_handlers(se);
