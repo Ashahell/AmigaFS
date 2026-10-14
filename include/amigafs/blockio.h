@@ -12,8 +12,8 @@
  * SECURITY: every block pointer that reaches this layer came from on-disk data
  * and is therefore untrusted. A block number outside the device/window is
  * REFUSED with a non-zero return. It is never clamped, never wrapped, and
- * never allowed to read past the window. A write backend will slot in here
- * later (D3) without changing anything above this interface.
+ * never allowed to read past the window. Writes obey the identical rule
+ * (D3): a clamp on a write path would corrupt the wrong block silently.
  */
 
 /* Opaque device handle. */
@@ -45,6 +45,10 @@ int blockdev_read_span(blockdev_t *d, uint32_t blockno, void *buf, size_t len);
 
 /* Write (currently unsupported -- read-only phase). Always returns non-zero. */
 int blockdev_write(blockdev_t *d, uint32_t blockno, const void *buf, size_t len);
+
+/* Writable file backend (D3 write phase). Refuses writes outside the window
+ * exactly like reads; a read-only handle reports "read-only device". */
+blockdev_t *blockdev_open_file_rw(const char *path, size_t block_size);
 
 /* Number of blocks in this device/window. */
 uint32_t blockdev_block_count(const blockdev_t *d);

@@ -32,4 +32,10 @@ void afs_translate_ids(uint32_t mount_uid, uint32_t mount_gid,
                        uint32_t stored_uid, uint32_t stored_gid,
                        int amiga_ids, struct stat *st);
 
+/* Current time as an Amiga timestamp: days since 1978-01-01, minutes past
+ * midnight, ticks (1/50 s) past the minute. Ticks stay below 3000 by
+ * construction, so the value fits the dir-cache record's signed 16-bit
+ * fields. Before the Amiga epoch the fields read 0. */
+void afs_now_amiga(uint32_t *days, uint32_t *mins, uint32_t *ticks);
+
 #endif /* AMIGAFS_TRANSLATE_H */

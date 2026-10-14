@@ -96,6 +96,8 @@ where a file lives:
 ./build/afs cat    disk.hdd "OFS/Trashcan.info"
 ./build/afs verify disk.hdd              # every partition, each report named
 ./build/afs bitmap disk.hdd FFS          # the bitmap needs one partition
+./build/afs put    disk.hdd "FFS/NEWDIR/payload" payload.bin
+./build/afs mkdir  disk.hdd "FFS/NEWDIR"
 ```
 
 ## What it supports
@@ -142,8 +144,10 @@ example, and the two traps worth knowing about.
 
 ## Known limits
 
-- **Read-only.** Writing (including creating, deleting and the block
-  allocator) is a later phase; the core keeps a clean seam for it.
+- **Writes go through the CLI, not the mount.** `afs put`/`afs mkdir` create
+  files and directories on scratch copies (never fixtures); the FUSE mount
+  stays read-only and never writes. No overwrite/truncate, rename, or delete
+  yet -- a second write to live data is refused rather than merged.
 - **Directory hard links** are exposed as `ENOTDIR` rather than traversed —
   a hard-linked directory is a cycle the kernel dentry cache cannot represent.
   They are still listed.

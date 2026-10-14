@@ -133,15 +133,16 @@ int afs_volume_open_memory(void *data, size_t size, size_t bsize,
     return 0;
 }
 
-int afs_volume_open_window(const char *path, size_t bsize,
-                           uint32_t start_block, uint32_t nblocks,
-                           afs_volume_t **out, char *errbuf, size_t errlen) {
+static int open_window_impl(const char *path, size_t bsize,
+                            uint32_t start_block, uint32_t nblocks, int rw,
+                            afs_volume_t **out, char *errbuf, size_t errlen) {
     if (out) *out = NULL;
     afs_volume_t *v = calloc(1, sizeof *v);
     if (!v) { set_err(errbuf, errlen, "out of memory"); return -1; }
 
     v->bsize = bsize;
-    blockdev_t *base = blockdev_open_file(path, bsize);
+    blockdev_t *base = rw ? blockdev_open_file_rw(path, bsize)
+                          : blockdev_open_file(path, bsize);
     if (!base) {
         set_err(errbuf, errlen, "cannot open image '%s'", path);
         free(v);
@@ -202,6 +203,23 @@ int afs_volume_open_window(const char *path, size_t bsize,
     return 0;
 }
 
+int afs_volume_open_window(const char *path, size_t bsize,
+                           uint32_t start_block, uint32_t nblocks,
+                           afs_volume_t **out, char *errbuf, size_t errlen) {
+    return open_window_impl(path, bsize, start_block, nblocks, 0,
+                            out, errbuf, errlen);
+}
+
+/* Writable window (D3 write phase). Identical validation and layout to the
+ * read-only open; only the file backend differs. Callers write scratch copies,
+ * never fixtures -- but the layer does not know that. */
+int afs_volume_open_window_rw(const char *path, size_t bsize,
+                              uint32_t start_block, uint32_t nblocks,
+                              afs_volume_t **out, char *errbuf, size_t errlen) {
+    return open_window_impl(path, bsize, start_block, nblocks, 1,
+                            out, errbuf, errlen);
+}
+
 int afs_volume_open_file(const char *path, size_t bsize, uint32_t start_block,
                          afs_volume_t **out, char *errbuf, size_t errlen) {
     /* a whole image, or a partition that runs to the end of it */
@@ -232,4 +250,12 @@ int afs_volume_has_dircache(const afs_volume_t *v) { return afs_has_dircache(v->
 int afs_volume_read_block(afs_volume_t *v, uint32_t blockno, void *buf, size_t len) {
     if (!v) return -1;
     return blockdev_read(v->dev, blockno, buf, len);
+}
+
+/* Write one partition-relative block. Returns 0 on success. Refused on a
+ * read-only volume, like every other out-of-contract write. */
+int afs_volume_write_block(afs_volume_t *v, uint32_t blockno, const void *buf,
+                           size_t len) {
+    if (!v) return -1;
+    return blockdev_write(v->dev, blockno, buf, len);
 }

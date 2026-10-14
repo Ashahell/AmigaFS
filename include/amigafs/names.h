@@ -19,4 +19,9 @@ size_t latin1_to_utf8(const char *in, size_t len, char *out, size_t cap);
  * number of bytes written, or 0 if it does not fit. */
 size_t utf8_to_latin1(const char *in, size_t len, char *out, size_t cap);
 
+/* AmigaDOS name rules (FAQ §4.4): 1..30 bytes; ':' and '/' are forbidden
+ * (they separate devices/volumes and directories). Returns non-zero when the
+ * name is storable, 0 with no side effects otherwise. */
+int afs_name_valid(const char *name, size_t len);
+
 #endif /* AMIGAFS_NAMES_H */

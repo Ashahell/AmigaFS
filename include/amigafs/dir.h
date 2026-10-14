@@ -47,4 +47,33 @@ int afs_dir_list(afs_volume_t *v, uint32_t dirblock,
 int afs_dir_lookup(afs_volume_t *v, uint32_t dirblock,
                    const char *name, size_t namelen, afs_dirent_t *out);
 
+/* --- D3 write phase ---
+ *
+ * Linking and cache maintenance shared by file create and mkdir. Unlike the
+ * read path -- which ends a corrupt chain defensively -- these REFUSE with a
+ * named reason: linking a new entry onto a corrupt chain would bake the
+ * corruption into a volume we are supposed to be improving. */
+
+/* Link an already-written entry block into a directory's hash chain (bucket
+ * head or tail append) and write back every touched block restamped. The new
+ * block's own hash_chain field must already be 0. */
+int afs_dir_link_entry(afs_volume_t *v, uint32_t dirblock, uint32_t entryblock,
+                       char *errbuf, size_t errlen);
+
+/* Insert-or-refresh one dir-cache record for `dirblock` (no-op on non-DIRC
+ * volumes). A record for the same header block is patched in place (size and
+ * timestamp only -- comments and unknown bytes are preserved byte-for-byte);
+ * otherwise the record is appended, allocating and linking a new cache block
+ * when the last one is full. Every touched block is restamped. */
+int afs_dircache_upsert(afs_volume_t *v, uint32_t dirblock,
+                        const afs_dircache_rec_t *rec,
+                        char *errbuf, size_t errlen);
+
+/* Create a subdirectory. Refuses invalid names, duplicates (by the same
+ * case-insensitive lookup a later `ls` will use), and unwritable parents with
+ * named reasons. Sets *dir_out to the new directory's block. */
+int afs_dir_mkdir(afs_volume_t *v, uint32_t dirblock,
+                  const char *name, size_t namelen, uint32_t *dir_out,
+                  char *errbuf, size_t errlen);
+
 #endif /* AMIGAFS_DIR_H */

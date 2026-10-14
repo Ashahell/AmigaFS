@@ -1,5 +1,7 @@
 #include "amigafs/translate.h"
 
+#include <time.h>
+
 /* Seconds between the Unix epoch (1970-01-01) and the Amiga epoch
  * (1978-01-01). Verified exactly: 1978-01-01T00:00:00Z is 252460800. */
 #define AMIGA_EPOCH_OFFSET (252460800L)
@@ -54,4 +56,19 @@ void afs_translate_ids(uint32_t mount_uid, uint32_t mount_gid,
         st->st_uid = (uid_t)mount_uid;
         st->st_gid = (gid_t)mount_gid;
     }
+}
+
+void afs_now_amiga(uint32_t *days, uint32_t *mins, uint32_t *ticks) {
+    time_t now = time(NULL);
+    long since;
+    if (days) *days = 0;
+    if (mins) *mins = 0;
+    if (ticks) *ticks = 0;
+    if (now == (time_t)-1) return;
+    since = (long)now - AMIGA_EPOCH_OFFSET;
+    if (since < 0) return;
+    /* 64-bit arithmetic: days * 86400 overflows 32 bits within a year. */
+    if (days) *days = (uint32_t)((uint64_t)since / 86400u);
+    if (mins) *mins = (uint32_t)(((uint64_t)since % 86400u) / 60u);
+    if (ticks) *ticks = (uint32_t)(((uint64_t)since % 60u) * TICKS_PER_SEC);
 }

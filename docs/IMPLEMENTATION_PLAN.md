@@ -285,6 +285,41 @@ is uppercase and the `[a-z]` strip class dropped those lines; and a whitespace
 edit merged two lines and commented out the table assignment (`set -u` turned
 it into `info_out: unbound variable` rather than a silent empty diff).
 
+---
+
+## M13 — Writes: create, write, mkdir (2026-10-14)
+
+First half of D3's deferred scope (the allocator; FUSE stays read-only, and
+there is deliberately no overwrite/truncate/rename/delete yet). New surface:
+`blockdev_open_file_rw` + a real `blockdev_write` under the identical refuse-
+never-clamp bounds rule; `afs_volume_open_window_rw` (the read-only opens are
+byte-identical, and reads can never gain write permission by a flag flip);
+`alloc.c` (`afs_alloc_block`: first free from block 2, per-page checksums,
+INVALID→write→VALID flag dance); `afs_file_create` + `afs_file_write_all`
+(reversed tables, per-block high_seq, OFS next_data chains, FFS raw payloads,
+header flush with byte_size+mtime); `afs_dir_mkdir`; dir-cache insert/refresh
+on DIRC volumes (in-place patch preserves comments byte-for-byte); `afs put` /
+`afs mkdir` in the CLI reusing the M12 partition rule. Empty files are
+header-only (ADFlib issue #30's shape: highSeq=0, firstData=0, all slots zero
+— never a pointer at block 0). No transactions: linking is the last structural
+step, so a failed create leaves allocated-but-unreferenced blocks, never a
+half-linked entry.
+
+**Gate: `m13_write.sh` PASS, oracle-diffed in BOTH directions.** Our files read
+back by ADFlib readers (`adfls`/`unadf`, 3/3 identical incl. empty on
+DOS\0+DOS\2+DOS\5); xdftool's files read by us (independent writer); `verify`
+clean after writes; bitmap accounting exact; RDB write confined to its window
+(other 5 partitions byte-identical); written files mount-readable; negatives
+named (duplicate, missing parent, unknown partition). INTL folding pinned on
+creates with the only discriminator that separates the variants (accented
+bytes: ASCII folds everywhere on real AmigaDOS, so a case-only test would have
+enshrined a false expectation — caught during the run).
+
+**Load-bearing proof:** an always-partition-0 mutant is caught by the byte
+diffs. The bitmap `used` count is asserted as a relationship (ours == oracle
++ reserved-block bits as read), not a literal, because both oracles scope
+their totals two blocks smaller without saying which two.
+
 
 - **12/12** unit tests, **7/7** oracle gates, **20/20** ctest, **0** warnings under `-Wall -Wextra -Wshadow -Wconversion -Werror`.
 - Real Amiga disks mount read-only on Linux and read **byte-for-byte identically** to the ADFlib oracle (197 files through a live FUSE mount; 216 via the library).

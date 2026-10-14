@@ -33,14 +33,30 @@ static int usage(void) {
         "  afs cat    <image> <partition/path>\n"
         "  afs verify <image>\n"
         "  afs bitmap <image> <partition>\n"
+        "  afs put    <image> <partition/path> <local-file>\n"
+        "  afs mkdir  <image> <partition/dir>\n"
         "On an RDB-partitioned image the first path component names the\n"
-        "partition (as in the FUSE mount); `info` alone lists the partitions.\n");
+        "partition (as in the FUSE mount); `info` alone lists the partitions.\n"
+        "Writes go to the image file itself: work on a copy, never a fixture.\n");
     return 2;
 }
 
 static int open_volume(const char *image, afs_volume_t **out) {
     char err[256] = {0};
     if (afs_volume_open_file(image, 512, 0, out, err, sizeof err) != 0) {
+        fprintf(stderr, "afs: %s\n", err);
+        return 1;
+    }
+    return 0;
+}
+
+/* Writable whole-image open (floppies). RDB images address partitions, never
+ * the whole disk, for writes: block addresses are partition-relative, so a
+ * whole-disk write path would be nonsense. There is no `open_volume_rw` that
+ * takes a bare RDB image. */
+static int open_volume_rw(const char *image, afs_volume_t **out) {
+    char err[256] = {0};
+    if (afs_volume_open_window_rw(image, 512, 0, 0, out, err, sizeof err) != 0) {
         fprintf(stderr, "afs: %s\n", err);
         return 1;
     }
@@ -88,16 +104,28 @@ static const afs_rdb_partition_t *find_partition(const afs_rdb_t *rdb,
     return NULL;
 }
 
-/* Open the named partition of an RDB image as its own window. */
-static int open_partition(const char *image, const afs_rdb_partition_t *p,
-                          afs_volume_t **out) {
+/* Open the named partition of an RDB image as its own window. Reads stay
+ * read-only; writes go through the _rw spelling so a read path can never gain
+ * write permission by a flag flip. */
+static int open_partition_rw(const char *image, const afs_rdb_partition_t *p,
+                             afs_volume_t **out, int rw) {
     char err[256] = {0};
-    if (afs_volume_open_window(image, 512, p->start_block, p->size_blocks,
-                               out, err, sizeof err) != 0) {
+    int rc = rw ? afs_volume_open_window_rw(image, 512, p->start_block,
+                                            p->size_blocks, out,
+                                            err, sizeof err)
+                : afs_volume_open_window(image, 512, p->start_block,
+                                         p->size_blocks, out,
+                                         err, sizeof err);
+    if (rc != 0) {
         fprintf(stderr, "afs: partition '%s': %s\n", p->name, err);
         return 1;
     }
     return 0;
+}
+
+static int open_partition(const char *image, const afs_rdb_partition_t *p,
+                          afs_volume_t **out) {
+    return open_partition_rw(image, p, out, 0);
 }
 
 static const char *dostype_name(uint8_t flags) {
@@ -336,6 +364,161 @@ static int cmd_cat(const char *image, const char *path) {
     return 0;
 }
 
+/* Split `path` into parent chain + basename for creation commands. The parent
+ * must already exist (plain mkdir semantics, no -p): each component resolves
+ * by lookup, and a missing one is a named refusal, not an implicit mkdir. */
+static int resolve_parent(afs_volume_t *v, uint32_t root, const char *path,
+                          uint32_t *dirblk_out, const char **base_out,
+                          char *dirbuf, size_t dirbuf_cap) {
+    const char *base = path, *slash = strrchr(path, '/');
+    size_t dl;
+    if (slash) {
+        dl = (size_t)(slash - path);
+        if (dl >= dirbuf_cap) dl = dirbuf_cap - 1;
+        memcpy(dirbuf, path, dl);
+        dirbuf[dl] = '\0';
+        base = slash + 1;
+    } else {
+        dirbuf[0] = '\0';
+    }
+    if (!*base) return -1;
+    *dirblk_out = root;
+    *base_out = base;
+    if (dirbuf[0]) {
+        const char *p = dirbuf;
+        while (*p == '/') p++;
+        while (*p) {
+            char comp[256];
+            size_t o = 0;
+            afs_dirent_t e;
+            while (*p && *p != '/') {
+                if (o < sizeof comp - 1) comp[o++] = *p;
+                p++;
+            }
+            comp[o] = '\0';
+            while (*p == '/') p++;
+            if (!o) continue;
+            if (afs_dir_lookup(v, *dirblk_out, comp, o, &e) != 0) return -1;
+            if (e.kind != AFS_BLOCK_DIR) return -1;
+            *dirblk_out = e.block;
+        }
+    }
+    return 0;
+}
+
+/* Open `image` writable and resolve `path` to (volume, parent dirblock,
+ * basename), applying the M12 partition rule: on an RDB image the first
+ * component names the partition. All failures are named. */
+static int open_parent_rw(const char *image, const char *path,
+                          afs_volume_t **vol_out, uint32_t *dirblk_out,
+                          const char **base_out, char *dirbuf,
+                          size_t dirbuf_cap) {
+    afs_rdb_t rdb;
+    int has_rdb = probe_rdb(image, &rdb);
+    if (has_rdb < 0) { fprintf(stderr, "afs: cannot open %s\n", image); return 1; }
+    if (has_rdb) {
+        char first[256];
+        size_t o = 0;
+        const afs_rdb_partition_t *part;
+        const char *p = path;
+        while (*p == '/') p++;
+        while (*p && *p != '/' && o < sizeof first - 1) first[o++] = *p++;
+        first[o] = '\0';
+        if (!o) {
+            fprintf(stderr, "afs: need a path inside a partition\n");
+            return 1;
+        }
+        part = find_partition(&rdb, first);
+        if (!part) {
+            fprintf(stderr, "afs: no partition named '%s'\n", first);
+            return 1;
+        }
+        if (open_partition_rw(image, part, vol_out, 1) != 0) return 1;
+        while (*p == '/') p++;
+        path = p;
+        if (!*path) {
+            fprintf(stderr, "afs: need a path inside a partition\n");
+            afs_volume_close(*vol_out);
+            return 1;
+        }
+    } else {
+        if (open_volume_rw(image, vol_out) != 0) return 1;
+    }
+    if (resolve_parent(*vol_out, afs_volume_rootblock(*vol_out), path,
+                       dirblk_out, base_out, dirbuf, dirbuf_cap) != 0) {
+        fprintf(stderr, "afs: %s: no such directory\n", path);
+        afs_volume_close(*vol_out);
+        return 1;
+    }
+    return 0;
+}
+
+static int cmd_put(const char *image, const char *path, const char *local) {
+    afs_volume_t *v = NULL;
+    uint32_t dirblk = 0, hdr = 0;
+    const char *base = NULL;
+    char dirbuf[512], err[256] = {0};
+    uint8_t *data = NULL;
+    size_t len = 0;
+
+    if (!local) { fprintf(stderr, "afs: put needs a local file\n"); return 2; }
+    /* stat first: read_file returns NULL both for a missing file and for a
+     * 0-byte file, and those must not be confused (a missing input must never
+     * silently become an empty Amiga file). */
+    {
+        FILE *f = fopen(local, "rb");
+        long sz = -1;
+        if (!f) { fprintf(stderr, "afs: cannot open %s\n", local); return 1; }
+        if (fseek(f, 0, SEEK_END) == 0) sz = ftell(f);
+        fclose(f);
+        if (sz < 0) { fprintf(stderr, "afs: cannot read %s\n", local); return 1; }
+        if (sz == 0) {
+            len = 0;
+            data = NULL;
+        } else {
+            data = read_file(local, &len);
+            if (!data) { fprintf(stderr, "afs: cannot read %s\n", local); return 1; }
+        }
+    }
+    if (open_parent_rw(image, path, &v, &dirblk, &base, dirbuf, sizeof dirbuf) != 0) {
+        free(data);
+        return 1;
+    }
+    if (afs_file_create(v, dirblk, base, strlen(base), &hdr, err, sizeof err) != 0) {
+        fprintf(stderr, "afs: cannot create %s: %s\n", path, err);
+        afs_volume_close(v);
+        free(data);
+        return 1;
+    }
+    if (afs_file_write_all(v, hdr, data, len, err, sizeof err) != 0) {
+        fprintf(stderr, "afs: cannot write %s: %s\n", path, err);
+        afs_volume_close(v);
+        free(data);
+        return 1;
+    }
+    printf("%s: %zu bytes\n", path, len);
+    afs_volume_close(v);
+    free(data);
+    return 0;
+}
+
+static int cmd_mkdir(const char *image, const char *path) {
+    afs_volume_t *v = NULL;
+    uint32_t dirblk = 0, nb = 0;
+    const char *base = NULL;
+    char dirbuf[512], err[256] = {0};
+
+    if (open_parent_rw(image, path, &v, &dirblk, &base, dirbuf, sizeof dirbuf) != 0)
+        return 1;
+    if (afs_dir_mkdir(v, dirblk, base, strlen(base), &nb, err, sizeof err) != 0) {
+        fprintf(stderr, "afs: cannot mkdir %s: %s\n", path, err);
+        afs_volume_close(v);
+        return 1;
+    }
+    afs_volume_close(v);
+    return 0;
+}
+
 static int cmd_verify(const char *image) {
     size_t sz = 0;
     unsigned char *img = read_file(image, &sz);
@@ -468,6 +651,14 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "cat") == 0) {
         if (argc < 4) { fprintf(stderr, "afs: cat needs a path\n"); return 2; }
         return cmd_cat(image, argv[3]);
+    }
+    if (strcmp(cmd, "put") == 0) {
+        if (argc < 5) { fprintf(stderr, "afs: put needs a path and a local file\n"); return 2; }
+        return cmd_put(image, argv[3], argv[4]);
+    }
+    if (strcmp(cmd, "mkdir") == 0) {
+        if (argc < 4) { fprintf(stderr, "afs: mkdir needs a path\n"); return 2; }
+        return cmd_mkdir(image, argv[3]);
     }
     return usage();
 }

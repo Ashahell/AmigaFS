@@ -14,6 +14,7 @@ struct blockdev {
     /* backing */
     int         is_file;
     int         fd;
+    int         readonly;   /* refuse writes (read-only opens, incl. the mount) */
     uint8_t    *mem;
     size_t      mem_size;
     size_t      block_size;
@@ -57,6 +58,7 @@ blockdev_t *blockdev_open_memory(void *data, size_t size, size_t block_size) {
     if (!d) return NULL;
     d->is_file = 0;
     d->fd = -1;
+    d->readonly = 0;   /* memory images are writable; the caller owns the bytes */
     d->mem = (uint8_t *)data;
     d->mem_size = size;
     d->block_size = block_size;
@@ -67,22 +69,23 @@ blockdev_t *blockdev_open_memory(void *data, size_t size, size_t block_size) {
     return d;
 }
 
-blockdev_t *blockdev_open_file(const char *path, size_t block_size) {
+static blockdev_t *open_file_impl(const char *path, size_t block_size, int rw) {
     if (!path) return NULL;
-    FILE *f = fopen(path, "rb");
+    FILE *f = fopen(path, rw ? "r+b" : "rb");
     if (!f) return NULL;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
     long sz = ftell(f);
     fclose(f);
     if (sz <= 0) return NULL;
 
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, rw ? O_RDWR : O_RDONLY);
     if (fd < 0) return NULL;
 
     blockdev_t *d = calloc(1, sizeof *d);
     if (!d) { close(fd); return NULL; }
     d->is_file = 1;
     d->fd = fd;
+    d->readonly = !rw;
     d->block_size = block_size;
     if (init_geometry(d, (size_t)sz) != 0) {
         close(fd);
@@ -90,6 +93,17 @@ blockdev_t *blockdev_open_file(const char *path, size_t block_size) {
         return NULL;
     }
     return d;
+}
+
+blockdev_t *blockdev_open_file(const char *path, size_t block_size) {
+    return open_file_impl(path, block_size, 0);
+}
+
+/* Writable file backend, for the write phase (D3). Writes go only to scratch
+ * copies in practice -- gates copy fixtures to tmp first -- but the layer
+ * itself does not know that: same bounds discipline as reads either way. */
+blockdev_t *blockdev_open_file_rw(const char *path, size_t block_size) {
+    return open_file_impl(path, block_size, 1);
 }
 
 blockdev_t *blockdev_window(blockdev_t *base, uint32_t start_block, uint32_t nblocks) {
@@ -169,9 +183,44 @@ int blockdev_read_span(blockdev_t *d, uint32_t blockno, void *buf, size_t len) {
 }
 
 int blockdev_write(blockdev_t *d, uint32_t blockno, const void *buf, size_t len) {
-    (void)d; (void)blockno; (void)buf; (void)len;
-    if (d) set_err(d, "read-only device");
-    return -1;   /* read-only phase */
+    if (!d || !buf) return -1;
+    if (d->readonly) {
+        set_err(d, "read-only device");
+        return -1;
+    }
+    if (len == 0) return 0;
+    if (len > d->block_size) {
+        set_err(d, "write length exceeds block size");
+        return -1;
+    }
+    /* BOUNDS: the same security boundary as reads. A block number outside
+     * the window is REFUSED -- never clamped, never wrapped. On a write path
+     * a clamp would corrupt the wrong block silently, which is worse than
+     * the read-side equivalent. */
+    if (blockno >= d->nblocks) {
+        set_err(d, "block number outside window");
+        return -1;
+    }
+    uint64_t abs = (uint64_t)d->start_block + blockno;
+    uint64_t off = abs * (uint64_t)d->block_size;
+
+    if (d->is_file) {
+        size_t done = 0;
+        while (done < len) {
+            ssize_t n = pwrite(d->fd, (const uint8_t *)buf + done, len - done,
+                               (off_t)(off + done));
+            if (n <= 0) { set_err(d, "short or failed pwrite"); return -1; }
+            done += (size_t)n;
+        }
+        return 0;
+    } else {
+        if (off + len > (uint64_t)d->mem_size) {
+            set_err(d, "write past memory device");
+            return -1;
+        }
+        memcpy(d->mem + off, buf, len);
+        return 0;
+    }
 }
 
 uint32_t blockdev_block_count(const blockdev_t *d) {

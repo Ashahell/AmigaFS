@@ -43,6 +43,12 @@ int afs_volume_open_window(const char *path, size_t bsize,
                            uint32_t start_block, uint32_t nblocks,
                            afs_volume_t **out, char *errbuf, size_t errlen);
 
+/* Writable window (D3 write phase). Identical validation and layout to the
+ * read-only open; only the file backend differs. */
+int afs_volume_open_window_rw(const char *path, size_t bsize,
+                              uint32_t start_block, uint32_t nblocks,
+                              afs_volume_t **out, char *errbuf, size_t errlen);
+
 /* Open a volume from a file. */
 int afs_volume_open_file(const char *path, size_t bsize, uint32_t start_block,
                          afs_volume_t **out, char *errbuf, size_t errlen);
@@ -80,5 +86,10 @@ int afs_volume_has_dircache(const afs_volume_t *v);
 
 /* Read one partition-relative block. Returns 0 on success. */
 int afs_volume_read_block(afs_volume_t *v, uint32_t blockno, void *buf, size_t len);
+
+/* Write one partition-relative block. Returns 0 on success. Refused on a
+ * read-only volume, like every other out-of-contract write. */
+int afs_volume_write_block(afs_volume_t *v, uint32_t blockno, const void *buf,
+                           size_t len);
 
 #endif /* AMIGAFS_VOLUME_H */

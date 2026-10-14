@@ -24,6 +24,7 @@ add_library(amigafs_core STATIC
   src/lib/file.c
   src/lib/links.c
   src/lib/bitmap.c
+  src/lib/alloc.c
   src/lib/verify.c
   src/lib/rdb.c
   src/lib/translate.c
@@ -35,6 +36,7 @@ target_include_directories(amigafs_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 enable_testing()
 
 set(AMIGAFS_UNIT_TESTS
+  test_alloc
   test_be
   test_checksum
   test_hash
@@ -104,7 +106,7 @@ target_link_libraries(m6_damage_probe PRIVATE amigafs_core)
 # These compare the core library against pinned external oracles (ADFlib CLI,
 # amitools) and, for M8, against a real FUSE mount. They need the fixtures and
 # the oracles present, so they are registered but skipped cleanly when not.
-set(AMIGAFS_GATES m0_gate m2_gate m3_gate m4_gate m5_gate m6_gate m7_gate m8_gate m10_gate m10_mount_gate m11_gate m12_cli_rdb fuzz_gate mount_fuzz)
+set(AMIGAFS_GATES m0_gate m2_gate m3_gate m4_gate m5_gate m6_gate m7_gate m8_gate m10_gate m10_mount_gate m11_gate m12_cli_rdb m13_write fuzz_gate mount_fuzz)
 foreach(g ${AMIGAFS_GATES})
   add_test(NAME gate_${g}
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/oracle/${g}.sh)

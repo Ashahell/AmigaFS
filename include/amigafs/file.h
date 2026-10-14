@@ -90,4 +90,29 @@ int afs_file_comment(afs_volume_t *v, uint32_t dirblock,
 int afs_read_file_by_block(afs_volume_t *v, uint32_t fileblock,
                            void *out, size_t len, uint64_t offset, size_t *got);
 
+/* --- D3 write phase ---
+ *
+ * Create-then-write, mirroring ADFlib's open-"w" semantics without copying
+ * its API: create refuses an existing name (like adfFileOpen "w"), and there
+ * is deliberately no overwrite/truncate yet -- a second write to a non-empty
+ * header is refused with a named reason rather than silently extended. */
+
+/* Create an empty file in a directory: allocate a header block, write it
+ * (byte_size 0, no data blocks -- the ADFlib issue #30 shape), link it into
+ * the parent's hash chain, and add its dir-cache record on DIRC volumes.
+ * Refuses invalid names and duplicates with named reasons. Sets *hdr_out. */
+int afs_file_create(afs_volume_t *v, uint32_t dirblock,
+                    const char *name, size_t namelen, uint32_t *hdr_out,
+                    char *errbuf, size_t errlen);
+
+/* Write `len` bytes into a file created by afs_file_create: allocate data
+ * blocks (plus extension blocks past the first table), fill the REVERSED
+ * data tables, chain OFS data blocks, stamp the header (byte_size, mtime)
+ * and refresh the dir-cache record. FFS data blocks are raw; OFS data blocks
+ * carry the T_DATA header. A zero-length write only stamps the header.
+ * Refuses a non-empty header (no overwrite yet) with a named reason. */
+int afs_file_write_all(afs_volume_t *v, uint32_t hdrblock,
+                       const void *data, size_t len,
+                       char *errbuf, size_t errlen);
+
 #endif /* AMIGAFS_FILE_H */

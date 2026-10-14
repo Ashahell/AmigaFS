@@ -58,3 +58,12 @@ size_t utf8_to_latin1(const char *in, size_t len, char *out, size_t cap) {
     out[o] = '\0';
     return o;
 }
+
+int afs_name_valid(const char *name, size_t len) {
+    size_t i;
+    if (!name || len == 0 || len > 30) return 0;
+    for (i = 0; i < len; i++)
+        if (name[i] == '/' || name[i] == ':')
+            return 0;
+    return 1;
+}
