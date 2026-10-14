@@ -13,8 +13,19 @@
  *
  * The invariants checked are the ones that catch a damaged volume:
  * checksums, pointers in range, known block types, no block used twice,
- * used-vs-bitmap agreement, dir-cache consistent with the hash table, and
- * terminating chains. Nothing here mutates the image.
+ * dir-cache consistent with the hash table, terminating chains, and the
+ * bitmap's own self-consistency (flag, page checksums, page count). Nothing
+ * here mutates the image.
+ *
+ * --strict adds ONE further check: every block the tree references must be
+ * marked USED in the allocation map. It is off by default because a stale map
+ * is ORDINARY on a real Amiga disk -- of the eleven fixtures here, nine
+ * disagree with their own bitmap while being otherwise perfectly healthy
+ * (links.adf marks the live header of `file1` free). Reporting that as damage
+ * would drown the real findings. It matters because it is exactly what a
+ * WRITER depends on: allocating from such a map hands out a block that is
+ * still in use, and the resulting corruption is silent, because every pointer
+ * still resolves -- two entries merely come to claim the same block.
  */
 
 typedef enum {
@@ -36,7 +47,16 @@ typedef struct {
 } afs_verify_report_t;
 
 /* Verify an in-memory image of `size` bytes with `bsize`-byte blocks. Writes up
- * to `max` problems and returns how many were found (capped at max). */
+ * to `max` problems and returns how many were found (capped at max).
+ * `flags` is a bitmask; the only bit defined is AFS_VERIFY_STRICT. */
+#define AFS_VERIFY_STRICT 1
+
+int afs_verify_memory_ex(const uint8_t *img, size_t size, size_t bsize,
+                         afs_verify_report_t *out, int max, unsigned flags);
+
+/* The everyday check: structural damage, with strict mode OFF. Kept as its own
+ * entry point (rather than as flags == 0 at every call site) so that the many
+ * existing callers mean what they have always meant. */
 int afs_verify_memory(const uint8_t *img, size_t size, size_t bsize,
                       afs_verify_report_t *out, int max);
 

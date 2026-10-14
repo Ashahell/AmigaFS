@@ -85,7 +85,7 @@ store them, and a silent success would be worse than a refusal.
 ./build/afs info   disk.adf              # volume type, DOS type, rootblock, geometry
 ./build/afs ls     disk.adf [dir] -R     # list a directory (recursively with -R)
 ./build/afs cat    disk.adf /path/to/file
-./build/afs verify disk.adf              # structure check; exit 1 on problems
+./build/afs verify disk.adf [--strict]   # structure check; exit 1 on problems
 ./build/afs bitmap disk.adf              # free/used block summary
 ```
 
@@ -174,6 +174,14 @@ example, and the two traps worth knowing about.
 - **The directory cache is parsed and verified but not used for listing.** The
   hash table is the authority, so a stale cache cannot hide a file.
 - **64-bit (`ffstd64`) volumes** are refused rather than misread.
+- **Writes are refused on a volume whose bitmap cannot be trusted** — `bm_flag`
+  not `-1` (AmigaDOS saying the map is suspect), or a bitmap page count the
+  volume does not need. Rebuilding the map is not implemented, so the refusal is
+  the honest answer: allocating from such a map hands out a block that is still
+  in use, and the corruption is silent because every pointer still resolves.
+  `afs verify --strict` reports the disagreement; the default check does not,
+  because a stale map is ordinary on a real Amiga disk (nine of the eleven
+  fixtures here have one and are otherwise healthy).
 - Block sizes are read from the volume; the standard 512-byte floppy geometry
   is what the fixtures cover.
 
@@ -206,6 +214,10 @@ segfault this run":
   table), the tree must contain exactly the entries the model predicts, and
   every file must read back byte-identical. It is what found a real leak on the
   out-of-space path of `afs_file_write_all`.
+- `mount_fuzz.sh` — also carries a **write lane**: the same random workload
+  driven through a real `-o rw` mount, so the FUSE write ops themselves are
+  fuzzed. That is what found the stale-dentry and bitmap-trust corruptions
+  below.
 
 ## Licence
 

@@ -56,6 +56,18 @@ struct options {
 
 static struct options g_opt;
 
+/* How long the kernel may cache a name and its attributes. A read-only mount
+ * can promise an hour, because nothing in it can change. A WRITABLE one
+ * cannot: this shell frees blocks, so after an unlink + recreate the kernel is
+ * still holding the old inode, and an inode NUMBER here is a block number --
+ * it names a block that may now hold a directory or belong to a different
+ * file. The write probe hit precisely that and the shell refused the write
+ * with EIO, having been handed an inode that no longer named a file.
+ *
+ * Shortening the timeout is the only fix available: the hazard is in the NUMBER
+ * the kernel cached, not in anything else it remembered about it. */
+static double cache_timeout(void) { return g_opt.rw ? 0.0 : 3600.0; }
+
 /* One mounted volume: a floppy is a single part covering the whole image; an
  * RDB image has one part per partition. */
 #define AFS_MAX_PARTS 16
@@ -157,8 +169,8 @@ static void reply_synth(fuse_req_t req, fuse_ino_t ino, mode_t type, size_t size
     memset(&e, 0, sizeof e);
     e.ino = ino;
     e.generation = 0;
-    e.attr_timeout = 3600;
-    e.entry_timeout = 3600;
+    e.attr_timeout = cache_timeout();
+    e.entry_timeout = cache_timeout();
     if (type == S_IFDIR) synth_dir_stat(ino, &e.attr);
     else                synth_file_stat(ino, size, &e.attr);
     fuse_reply_entry(req, &e);
@@ -171,8 +183,8 @@ static void afs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
     if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
         memset(&e, 0, sizeof e);
         e.ino = parent;
-        e.attr_timeout = 3600;
-        e.entry_timeout = 3600;
+        e.attr_timeout = cache_timeout();
+        e.entry_timeout = cache_timeout();
         synth_dir_stat(parent, &e.attr);
         fuse_reply_entry(req, &e);
         return;
@@ -267,8 +279,19 @@ static void afs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 
     e.ino = INO_BLOCK(g_parts[vi].start + ino_blk);
     e.generation = 0;
-    e.attr_timeout = 3600;
-    e.entry_timeout = 3600;
+    /* A read-only mount may promise its names and attributes are stable for
+     * an hour, because nothing can change them. A WRITABLE mount cannot: this
+     * shell frees blocks, and after a unlink + recreate the kernel is still
+     * holding the old inode -- pointing at a block that now holds a directory,
+     * or has been handed to a different file. The write probe hit exactly
+     * that: a write landed on a freed block and the shell refused it with EIO,
+     * having been handed an inode that no longer names a file.
+     *
+     * Short timeouts are the fix, not shorter-lived inodes: the inode NUMBER
+     * is a block number, so it cannot be made safe by expiring anything the
+     * kernel caches about it. */
+    e.attr_timeout = cache_timeout();
+    e.entry_timeout = cache_timeout();
 
     afs_block_kind_t k = afs_block_kind(blk, bs);
     if (k == AFS_BLOCK_ROOT) {
@@ -300,14 +323,14 @@ static void afs_ll_getattr(fuse_req_t req, fuse_ino_t ino,
 
     if (ino == INO_ROOT) {
         synth_dir_stat(ino, &st);
-        fuse_reply_attr(req, &st, 3600);
+        fuse_reply_attr(req, &st, cache_timeout());
         return;
     }
     if (IS_SYNTH(ino)) {
         unsigned vi = (unsigned)((ino - SYNTH_BASE) / 2u);
         if ((ino - SYNTH_BASE) % 2u == 0) synth_dir_stat(ino, &st);
         else synth_file_stat(ino, vi < g_nparts ? bitmap_size(vi) : 0, &st);
-        fuse_reply_attr(req, &st, 3600);
+        fuse_reply_attr(req, &st, cache_timeout());
         return;
     }
 
@@ -340,7 +363,7 @@ static void afs_ll_getattr(fuse_req_t req, fuse_ino_t ino,
         if (k == AFS_BLOCK_SOFTLINK) st.st_size = 0;
     }
     free(blk);
-    fuse_reply_attr(req, &st, 3600);
+    fuse_reply_attr(req, &st, cache_timeout());
 }
 
 static void afs_ll_opendir(fuse_req_t req, fuse_ino_t ino,
@@ -478,6 +501,32 @@ static void afs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 /* ---------------------------------------------------------------------- */
 /* open / read / readlink                                                   */
 /* ---------------------------------------------------------------------- */
+
+/* Library error text -> errno, in ONE place.
+ *
+ * Seven write ops each called several library functions that can all refuse,
+ * and each had grown its own ad-hoc strstr chain. They had drifted: only the
+ * write op knew about ENOSPC, so a create or mkdir that ran out of room
+ * answered EIO. The write lane caught it as an "unsanctioned errno" on a
+ * perfectly healthy volume that had simply filled up -- which is exactly the
+ * failure a user sees as an unexplained I/O error instead of "no space".
+ *
+ * Order matters: the more specific phrases are tested first ("is a directory"
+ * before anything that merely contains "directory").
+ */
+static int err_to_errno(const char *msg) {
+    if (!msg || !msg[0]) return EIO;
+    if (strstr(msg, "already exists"))   return EEXIST;
+    if (strstr(msg, "not empty"))       return ENOTEMPTY;
+    if (strstr(msg, "not found"))       return ENOENT;
+    if (strstr(msg, "is a directory"))  return EISDIR;
+    if (strstr(msg, "not a directory")) return ENOTDIR;
+    if (strstr(msg, "into itself"))     return EINVAL;
+    if (strstr(msg, "link"))            return EOPNOTSUPP;
+    if (strstr(msg, "name"))            return EINVAL;
+    if (strstr(msg, "full") || strstr(msg, "no free block")) return ENOSPC;
+    return EIO;
+}
 
 static int refuse_if_ro(fuse_req_t req);
 
@@ -738,8 +787,7 @@ static void afs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 
     if (afs_file_create(vol, pblk, name, strlen(name), &hdr,
                         err, sizeof err) != 0) {
-        fuse_reply_err(req, strstr(err, "exists") ? EEXIST
-                        : strstr(err, "name") ? EINVAL : EIO);
+        fuse_reply_err(req, err_to_errno(err));
         return;
     }
     fi->fh = (fi->flags & O_APPEND) ? FH_APPEND : 0;
@@ -775,8 +823,7 @@ static void afs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf,
     if (afs_file_write_range(vol, blk, buf, size, at, err, sizeof err) != 0) {
         /* a full volume is the common real failure and deserves its own errno;
          * everything else here is an I/O or structure refusal */
-        fuse_reply_err(req, strstr(err, "full") || strstr(err, "space")
-                            ? ENOSPC : EIO);
+        fuse_reply_err(req, err_to_errno(err));
         return;
     }
     fuse_reply_write(req, size);
@@ -793,8 +840,7 @@ static void afs_ll_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name,
     char err[256] = {0};
     if (afs_dir_mkdir(g_parts[vi].vol, pblk, name, strlen(name), &nb,
                       err, sizeof err) != 0) {
-        fuse_reply_err(req, strstr(err, "exists") ? EEXIST
-                        : strstr(err, "name") ? EINVAL : EIO);
+        fuse_reply_err(req, err_to_errno(err));
         return;
     }
     reply_entry_block(req, vi, nb, NULL, 0);
@@ -822,11 +868,11 @@ static void afs_ll_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
         if (afs_dir_rmdir(vol, pblk, name, strlen(name), err, sizeof err) != 0) {
             /* non-empty is ENOTEMPTY, not EIO: `rm -r` and every POSIX caller
              * branch on it */
-            fuse_reply_err(req, strstr(err, "not empty") ? ENOTEMPTY : EIO);
+            fuse_reply_err(req, err_to_errno(err));
             return;
         }
     } else {
-        fuse_reply_err(req, strstr(err, "link") ? EOPNOTSUPP : EISDIR);
+        fuse_reply_err(req, err_to_errno(err));
         return;
     }
     fuse_reply_err(req, 0);
@@ -841,9 +887,7 @@ static void afs_ll_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
     afs_volume_t *vol = g_parts[vi].vol;
     char err[256] = {0};
     if (afs_dir_rmdir(vol, pblk, name, strlen(name), err, sizeof err) != 0) {
-        fuse_reply_err(req, strstr(err, "not empty") ? ENOTEMPTY
-                        : strstr(err, "not found") ? ENOENT
-                        : strstr(err, "not a directory") ? ENOTDIR : EIO);
+        fuse_reply_err(req, err_to_errno(err));
         return;
     }
     fuse_reply_err(req, 0);
@@ -872,10 +916,7 @@ static void afs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
     char err[256] = {0};
     if (afs_dir_rename(g_parts[vi].vol, sblk, name, strlen(name),
                        nblk, newname, strlen(newname), err, sizeof err) != 0) {
-        fuse_reply_err(req, strstr(err, "not found") ? ENOENT
-                        : strstr(err, "exists") ? EEXIST
-                        : strstr(err, "itself") ? EINVAL
-                        : strstr(err, "name") ? EINVAL : EIO);
+        fuse_reply_err(req, err_to_errno(err));
         return;
     }
     fuse_reply_err(req, 0);
@@ -924,8 +965,7 @@ static void afs_ll_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
     }
     if (afs_file_write_all(vol, blk, buf, want, err, sizeof err) != 0) {
         free(buf);
-        fuse_reply_err(req, strstr(err, "full") || strstr(err, "space")
-                            ? ENOSPC : EIO);
+        fuse_reply_err(req, err_to_errno(err));
         return;
     }
     free(buf);

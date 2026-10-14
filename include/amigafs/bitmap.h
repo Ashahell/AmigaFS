@@ -20,4 +20,16 @@ void afs_bitmap_clear(uint8_t *map, uint32_t blk);
  * Returns the number of storage blocks read, or -1 on error. */
 int afs_bitmap_read(afs_volume_t *v, uint8_t *out, size_t out_cap);
 
+/* How many bitmap storage blocks a volume of `nblocks` blocks needs: one bit
+ * per block, 32 bits per long, (bsize/4) longs per page.
+ *
+ * This lives here because TWO places must agree on it and previously each had
+ * its own copy: the verifier reports a page count that disagrees with this as
+ * a problem, and the allocator must refuse such a volume outright. A writer
+ * that accepts a page list longer than the volume needs is reading map bits
+ * that describe blocks outside the volume -- and g1a30c.adf's second page is
+ * not merely redundant: block 948 is simultaneously that page and a live
+ * directory entry, so allocating from it hands out a block that is in use. */
+size_t afs_bitmap_pages_required(uint32_t nblocks, size_t bsize);
+
 #endif /* AMIGAFS_BITMAP_H */

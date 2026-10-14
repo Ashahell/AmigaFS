@@ -47,6 +47,48 @@ static int read_bitmap_root(afs_volume_t *v, uint8_t *rblk, size_t bs,
                 "bitmap extension chain not supported (volume too large)");
         return -1;
     }
+    /* bm_flag == -1 means "the bitmap agrees with the volume". Any other value
+     * is AmigaDOS saying the map is SUSPECT and must be rebuilt by walking the
+     * tree -- which this library does not do. Allocating from a suspect map
+     * hands out blocks that are still referenced, and the corruption is silent:
+     * the volume verifies as a tree (every pointer resolves) while two entries
+     * now claim the same block, so the next write through either one destroys
+     * the other.
+     *
+     * ffdisk0049.adf is exactly this case -- bm_flag = 1, and its map marks
+     * block 1089 free while that block is the header of Plot/save.c. Writing
+     * to it allocated 1089 a second time. So refuse, with a name, rather than
+     * corrupt: the same discipline as the bitmap-extension refusal above. */
+    if (root->bm_flag != 0xFFFFFFFFu) {
+        set_err(errbuf, errlen,
+                "bitmap flagged invalid (bm_flag=0x%08x); the volume needs "
+                "its allocation map rebuilt before it can be written",
+                root->bm_flag);
+        return -1;
+    }
+    /* The page list is zero-terminated, so its length is the volume's own
+     * claim. More pages than the volume needs means map bits describing blocks
+     * outside the volume -- and in g1a30c.adf the surplus page is not merely
+     * redundant: block 948 is both page 2 and a live directory entry, so
+     * allocating from it hands out a block that is already in use. Same
+     * refusal discipline as the extension chain above, and the same formula
+     * the verifier applies (one definition, in bitmap.c). */
+    {
+        uint32_t nblocks = afs_volume_block_count(v);
+        int pages = 0;
+        for (int i = 0; i < 25; i++) {
+            if (root->bm_pages[i] == 0) break;
+            pages++;
+        }
+        size_t want = afs_bitmap_pages_required(nblocks, bs);
+        if ((size_t)pages != want) {
+            set_err(errbuf, errlen,
+                    "bitmap block count %d, but a %u-block volume needs %zu; "
+                    "the allocation map cannot be trusted",
+                    pages, nblocks, want);
+            return -1;
+        }
+    }
     return 0;
 }
 

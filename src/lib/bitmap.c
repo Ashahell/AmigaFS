@@ -9,6 +9,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+size_t afs_bitmap_pages_required(uint32_t nblocks, size_t bsize) {
+    size_t longs_needed = ((size_t)nblocks + 31u) / 32u;
+    size_t longs_per_page = bsize / 4u;
+    return longs_per_page ? (longs_needed + longs_per_page - 1u) / longs_per_page
+                          : 0u;
+}
+
 /* Test/set one bit in a raw bitmap buffer (bit 0 of long 0 = block 0). */
 int afs_bitmap_test(const uint8_t *map, uint32_t blk) {
     const uint8_t *p = map + (blk / 32) * 4;

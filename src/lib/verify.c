@@ -144,8 +144,8 @@ static void visit_entry(afs_volume_t *v, uint32_t block, visit_ctx_t *vc,
     free(b);
 }
 
-int afs_verify_memory(const uint8_t *img, size_t size, size_t bsize,
-                      afs_verify_report_t *out, int max) {
+int afs_verify_memory_ex(const uint8_t *img, size_t size, size_t bsize,
+                         afs_verify_report_t *out, int max, unsigned flags) {
     if (!img || !out || max <= 0) return 0;
 
     afs_volume_t *v = NULL;
@@ -231,18 +231,58 @@ int afs_verify_memory(const uint8_t *img, size_t size, size_t bsize,
          * and (block_size/4) longs per page. More pages than that means extra
          * blocks are being claimed as allocation map that do not need to be. */
         {
-            size_t longs_needed = ((size_t)nblocks + 31) / 32;
-            size_t longs_per_page = bs / 4;
-            size_t want = longs_per_page ? (longs_needed + longs_per_page - 1)
-                                              / longs_per_page : 0;
+            /* the formula lives in bitmap.c: the allocator enforces the same
+             * invariant (and refuses such a volume outright), so the two
+             * cannot drift apart */
+            size_t want = afs_bitmap_pages_required((uint32_t)nblocks, bs);
             if (npages != (int)want)
                 add_problem(out, &n, max, AFS_PROBLEM_BITMAP_MISMATCH, 0,
                             "bitmap block count %d, but a %u-block volume "
                             "needs %zu", npages, nblocks, want);
         }
+
+        /* PER-BLOCK AGREEMENT -- the check the header of this file has always
+         * claimed and which did not exist. It is the one that matters for a
+         * WRITER: a block the tree references but the map calls free will be
+         * handed out again by the allocator, and the corruption is silent
+         * because every pointer still resolves -- two entries just end up
+         * claiming the same block, and the next write through either destroys
+         * the other. ffdisk0049.adf is exactly this (map calls block 1089 free;
+         * it is Plot/save.c's header).
+         *
+         * Only the REFERENCED-BUT-FREE direction is asserted. The reverse is
+         * normal and must not be flagged: the bootblock and its mirror, and
+         * often the rootblock itself, are marked used without appearing in any
+         * chain, and every healthy fixture here has several such blocks.
+         *
+         * Runs after the page loop above so `marks` already includes the
+         * bitmap pages themselves. */
+        {
+            size_t mapbytes = ((size_t)nblocks + 7u) / 8u;
+            uint8_t *map;
+            if (!(flags & AFS_VERIFY_STRICT)) goto skip_agreement;
+            map = malloc(mapbytes ? mapbytes : 1);
+            if (map && afs_bitmap_read(v, map, mapbytes) > 0) {
+                for (uint32_t b = 0; b < (uint32_t)nblocks && n < max; b++) {
+                    if (vc.marks[b] && afs_bitmap_test(map, b))
+                        add_problem(out, &n, max,
+                                    AFS_PROBLEM_BITMAP_MISMATCH, b,
+                                    "block %u is referenced by the tree but "
+                                    "the bitmap marks it free", b);
+                }
+            }
+            free(map);
+        }
+skip_agreement:
+            ;
     }
 
     free(vc.marks);
     afs_volume_close(v);
     return n;
+}
+
+int afs_verify_memory(const uint8_t *img, size_t size, size_t bsize,
+                      afs_verify_report_t *out, int max) {
+    return afs_verify_memory_ex(img, size, bsize, out, max, 0);
 }

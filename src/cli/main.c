@@ -8,7 +8,7 @@
  *   afs info   <image>              volume type, DOS type, rootblock, name
  *   afs ls     <image> [dir] [-R]    list a directory (recursively with -R)
  *   afs cat    <image> <path>       write a file's contents to stdout
- *   afs verify <image>              structure check; exit 1 if problems
+ *   afs verify <image> [--strict]   structure check; exit 1 if problems
  *   afs bitmap <image>              free/used block bitmap summary
  */
 #include <dirent.h>
@@ -31,7 +31,7 @@ static int usage(void) {
         "  afs info   <image> [partition]\n"
         "  afs ls     <image> [partition/dir] [-R]\n"
         "  afs cat    <image> <partition/path>\n"
-        "  afs verify <image>\n"
+        "  afs verify <image> [--strict]\n"
         "  afs bitmap <image> <partition>\n"
         "  afs put    <image> <partition/path> <local-file>\n"
         "  afs mkdir  <image> <partition/dir>\n"
@@ -619,7 +619,8 @@ static int cmd_mv(const char *image, const char *src, const char *dst) {
     return 0;
 }
 
-static int cmd_verify(const char *image) {
+static int cmd_verify(const char *image, int strict) {
+    unsigned flags = strict ? AFS_VERIFY_STRICT : 0u;
     size_t sz = 0;
     unsigned char *img = read_file(image, &sz);
     afs_verify_report_t rep[256];
@@ -648,7 +649,7 @@ static int cmd_verify(const char *image) {
                 total++;
                 continue;
             }
-            n = afs_verify_memory(img + off, len, 512, rep, 256);
+            n = afs_verify_memory_ex(img + off, len, 512, rep, 256, flags);
             if (n == 0) {
                 printf("%s [%s]: OK, no structural problems found\n",
                        image, p->name);
@@ -664,7 +665,7 @@ static int cmd_verify(const char *image) {
         return total == 0 ? 0 : 1;
     }
 
-    n = afs_verify_memory(img, sz, 512, rep, 256);
+    n = afs_verify_memory_ex(img, sz, 512, rep, 256, flags);
     if (n == 0) {
         printf("%s: OK, no structural problems found\n", image);
     } else {
@@ -736,7 +737,12 @@ int main(int argc, char **argv) {
     const char *image = argv[2];
 
     if (strcmp(cmd, "info") == 0)        return cmd_info(image, argc > 3 ? argv[3] : NULL);
-    if (strcmp(cmd, "verify") == 0)      return cmd_verify(image);
+    if (strcmp(cmd, "verify") == 0) {
+        int strict = 0;
+        for (int i = 3; i < argc; i++)
+            if (strcmp(argv[i], "--strict") == 0) strict = 1;
+        return cmd_verify(image, strict);
+    }
     if (strcmp(cmd, "bitmap") == 0)      return cmd_bitmap(image, argc > 3 ? argv[3] : NULL);
     if (strcmp(cmd, "ls") == 0) {
         const char *dir = NULL;

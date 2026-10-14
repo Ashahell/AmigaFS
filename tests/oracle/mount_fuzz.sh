@@ -89,6 +89,12 @@ if ! cc -std=gnu99 -g -O1 -Wall -Wextra -Werror \
     head -10 "$WORK/probe.log" | sed 's/^/      /'
     exit 1
 fi
+if ! cc -std=gnu99 -g -O1 -Wall -Wextra -Werror \
+        -o "$WORK/mount_write_probe" "$HERE/mount_write_probe.c" 2>"$WORK/wprobe.log"; then
+    echo "Mount fuzz gate: FAIL -- mount_write_probe did not build"
+    head -10 "$WORK/wprobe.log" | sed 's/^/      /'
+    exit 1
+fi
 
 # LeakSanitizer is off deliberately: the mount is a long-lived daemon torn down
 # by a signal on unmount, so its exit path is not a meaningful leak oracle and
@@ -224,6 +230,130 @@ if [ "$mounted" -lt 3 ] || [ "$entries" -lt 50 ] || [ "$files" -lt 10 ]; then
 else
     ok "reached the parser through a real mount" \
        "$mounted mounted, $refused refused, $entries entries, $files files"
+fi
+
+echo
+echo "--- write lane: the FUSE write ops through a real -o rw mount ---"
+
+# The write ops (create/write/setattr/mkdir/unlink/rmdir/rename, the O_APPEND
+# redirect, the Amiga protection-bit check, and the reply types) are the one
+# layer with no fuzz coverage: mount_probe exercises the shell's READ
+# arithmetic, tests/write_fuzz.c exercises the LIBRARY's write path against a
+# model, and between them the shell itself was only ever driven by fixed POSIX
+# scenarios. Two of its bugs so far surfaced as "fuse: writing device: Invalid
+# argument" -- an error from the reply WRITER, not from the operation.
+#
+# TWO PASSES, because the checks are only meaningful on a volume the write path
+# can reason about:
+#   strict  - unmutated images. Every errno must be one the design sanctions,
+#             and EIO is NOT among them: a healthy volume answering EIO is a
+#             defect, and this is the pass that would catch it.
+#   lenient - deliberately mutated images, where meeting a structure the write
+#             path refuses to write through and answering EIO is the DESIGNED
+#             behaviour. The differential check (what the mount accepted must
+#             be observable, what it refused must leave the volume alone) still
+#             applies in full.
+# As in the read lane, coverage floors are absolute, so a short run cannot pass
+# by doing nothing.
+wmounted=0; wrefused=0; wprobe_fail=0; wsan=0; wops=0; waccepted=0
+wclasses=0; wnowrite=0
+for lane in strict lenient; do
+    lane_iters=$(( ITERS / 2 ))
+    [ "$lane" = strict ] && lane_iters=8
+    for i in $(seq 1 "$lane_iters"); do
+        src="${SOURCES[$(( (i + 7) % ${#SOURCES[@]} ))]}"
+        cp "$src" "$IMG" 2>/dev/null || continue
+        size=$(stat -c%s "$IMG" 2>/dev/null || echo 0)
+        [ "$size" -gt 1024 ] || continue
+        # the lenient lane mutates; the strict lane must stay a healthy volume
+        if [ "$lane" = lenient ]; then
+            off=$(( (RANDOM * 32768 + RANDOM) % (size / 512) * 512 ))
+            printf "$(printf '\\%03o' $(( (RANDOM % 255) + 1 )))" \
+                | dd of="$IMG" bs=1 seek="$off" count=1 conv=notrunc status=none 2>/dev/null
+        fi
+
+        log="$WORK/wmnt.log"
+        "$WORK/fuse_asan" -f "$IMG" "$MNT" -o rw > "$log" 2>&1 &
+        MPID=$!
+        mnt_ready=0
+        for _ in $(seq 1 24); do
+            if grep -qF " $(readlink -f "$MNT" 2>/dev/null || echo "$MNT") fuse " \
+                 /proc/self/mounts 2>/dev/null; then
+                mnt_ready=1
+                break
+            fi
+            kill -0 "$MPID" 2>/dev/null || break
+            sleep 0.25
+        done
+
+        if [ "$mnt_ready" -eq 0 ]; then
+            wrefused=$((wrefused+1))
+            if grep -qE "ERROR: (Address|Leak)Sanitizer|runtime error:" "$log"; then
+                wsan=$((wsan+1))
+                grep -m1 -E "ERROR: (Address|Leak)Sanitizer|runtime error:" "$log" \
+                    | sed "s/^/      $lane iter $i: /"
+            fi
+            wait "$MPID" 2>/dev/null
+            MPID=""
+            continue
+        fi
+        wmounted=$((wmounted+1))
+
+        wargs="$MNT 250 17"
+        [ "$lane" = lenient ] && wargs="$wargs --lenient"
+        # the scratch directory is created by the probe inside the mount
+        timeout 300 "$WORK/mount_write_probe" $wargs > "$WORK/wprobe.out" 2>"$WORK/wprobe.err"
+        wrc=$?
+        if [ $wrc -eq 3 ]; then
+            # the volume refuses writes on purpose (bitmap flagged invalid,
+            # untrustworthy page count). Counted, not failed: a refused write
+            # is the design working.
+            wnowrite=$((wnowrite+1))
+        elif [ $wrc -ne 0 ]; then
+            wprobe_fail=$((wprobe_fail+1))
+            head -3 "$WORK/wprobe.err" | sed "s/^/      $lane iter $i: /"
+        else
+            o=$(sed -n 's/^wprobe: ops=\([0-9]*\) accepted=\([0-9]*\).*/\1 \2/p' "$WORK/wprobe.out")
+            # guard the arithmetic: a probe that produced no tally must not
+            # turn into a shell syntax error that hides the real finding
+            [ -n "$o" ] || o="0 0"
+            wops=$((wops + ${o%% *}))
+            waccepted=$((waccepted + ${o##* }))
+            # a class counts as exercised when the probe tried it at all
+            wclasses=$((wclasses + $(grep -c 'tried=' "$WORK/wprobe.out")))
+        fi
+
+        if grep -qE "ERROR: (Address|Leak)Sanitizer|runtime error:" "$log"; then
+            wsan=$((wsan+1))
+            grep -m1 -E "ERROR: (Address|Leak)Sanitizer|runtime error:" "$log" \
+                | sed "s/^/      $lane iter $i: /"
+        fi
+
+        fusermount3 -u "$MNT" >/dev/null 2>&1
+        gone=0
+        for _ in $(seq 1 20); do
+            if ! kill -0 "$MPID" 2>/dev/null; then gone=1; break; fi
+            sleep 0.1
+        done
+        [ "$gone" -eq 0 ] && kill "$MPID" 2>/dev/null
+        wait "$MPID" 2>/dev/null
+        MPID=""
+    done
+done
+
+echo "  write lane: mounted=$wmounted refused=$wrefused ops=$wops accepted=$waccepted nowrite=$wnowrite"
+
+[ "$wsan" -eq 0 ] \
+    || err "sanitizer reports from the rw mount" "$wsan iteration(s)"
+[ "$wprobe_fail" -eq 0 ] \
+    || err "write probe saw a failure" "$wprobe_fail iteration(s)"
+if [ "$wmounted" -lt 3 ] || [ "$wops" -lt 200 ] || [ "$waccepted" -lt 100 ] \
+   || [ "$wclasses" -lt 16 ]; then
+    err "write coverage too low to be meaningful" \
+        "mounted=$wmounted (need >=3) ops=$wops (need >=200) accepted=$waccepted (need >=100) class-lines=$wclasses (need >=16)"
+else
+    ok "write ops reached through a real -o rw mount" \
+       "$wmounted mounted, $wrefused refused, $wops ops, $waccepted accepted"
 fi
 
 if [ $fails -eq 0 ]; then

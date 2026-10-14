@@ -338,6 +338,108 @@ grow/shrink/empty cases (80 checks).
 
 ---
 
+## M17 — FUSE write-op fuzz lane, and two silent corruptions it found (2026-10-14)
+
+The library had a differential fuzz (M16) and the shell had none: the FUSE write
+ops were only ever driven by fixed POSIX scenarios. `tests/oracle/mount_write_probe.c`
+is that lane — a random write workload through a real `-o rw` mount, checked
+against an in-memory model. Every operation the mount ACCEPTS must be observable
+afterwards, and every operation it REFUSES must leave the volume as it was. It
+does not require the volume to be healthy, which matters because the lane
+mounts deliberately mutated images.
+
+Two passes, because the checks mean different things on different volumes:
+**strict** (unmutated images — every errno must be one the design sanctions, and
+`EIO` is *not* among them) and **lenient** (mutated images, where `EIO` is the
+designed answer for "I met a structure I refuse to write through"). Both run the
+differential check in full.
+
+### Two silent corruptions, found and fixed
+
+**1. Stale kernel dentries pointing at freed blocks.** A write landed on a block
+that was no longer a file, and the shell refused it with `EIO`, having been handed
+an inode that no longer named a file. The cause: the shell handed the kernel
+3600-second dentry and attribute timeouts *even on a writable mount*. Nothing in
+a read-only mount can change, so that promise is honest there; on a writable one
+this shell frees blocks, so after an unlink the kernel is still holding an inode
+— and **an inode number here IS a block number**, so it cannot be made safe by
+expiring anything else the kernel cached. All timeouts now go through one
+`cache_timeout()` helper: an hour when read-only, zero when writable.
+
+**Honest caveat:** this is justified by that measurement and by principle, but I
+could NOT reproduce the original failure independently — 200 deliberate
+unlink-then-recreate cycles on a clean volume are clean, and a mutant that
+restores the 3600-second timeouts does **not** turn the gate red. So the lane
+does not currently cover it, and this record should not be read as claiming it
+does.
+
+**2. Allocating from a bitmap that disagrees with the volume — the serious one.**
+`ffdisk0049.adf` has `bm_flag = 1`: AmigaDOS saying its allocation map is suspect
+and must be rebuilt by walking the tree, which this library does not do. Its map
+marks block 1089 free; block 1089 is the header of `Plot/save.c`. Three `create`
+calls later, that block was the header of a brand-new file too. The volume still
+*verified* — every pointer resolves, two entries merely claim the same block —
+and the corruption only surfaced as a subsequent write failing. `g1a30c.adf` has
+the same shape via a different route: two bitmap pages for a volume that needs
+one, and the surplus page is simultaneously a live directory entry.
+
+Both are now **refused with a name** in `read_bitmap_root()`, beside the existing
+bitmap-extension refusal and for the same reason — refuse rather than corrupt:
+
+- `bm_flag != -1` → "the volume needs its allocation map rebuilt";
+- page count ≠ `afs_bitmap_pages_required()` → "the allocation map cannot be
+  trusted".
+
+The page-count formula was duplicated in the verifier and has been hoisted into
+`bitmap.c` so the writer and the checker cannot drift.
+
+### A check the verifier claimed and did not have
+
+`verify.h`'s header has always listed "used-vs-bitmap agreement" among the
+invariants. **No such per-block check existed.** The newly-added one is behind
+`--strict`, and off by default for a measured reason: **nine of the eleven
+fixtures have bitmaps that disagree with their own contents** while being
+otherwise perfectly healthy (`links.adf` marks the live header of `file1` free).
+Stale maps are ordinary on real Amiga disks — that is what `bm_flag` is *for* —
+so reporting it as damage by default would drown the real findings. It is
+`afs verify --strict` now, and the reason it is worth having is exactly finding 2.
+
+### Gate-hygiene findings, all the same shape
+
+A green run not testing what it claimed, five times over:
+
+- **`resolve_dir` walked the wrong path** — the directory's *parent*, so a
+  one-component path resolved to the root. The first failure read as a library
+  bug (a rename moved a file out of a subdirectory); the volume was right.
+- **`expect_file`'s buffer was `MAX_DATA+16`** while appends grow files past
+  that, so it reported "read 2016 of 2297" against a perfectly correct file.
+- **`dir_empty` never recognised root-level children** (a file directly in the
+  scratch root has a path with no leading slash), so the scratch root looked
+  permanently empty — and the probe deleted its own working directory, after
+  which every operation failed `ENOENT`: two seeds reported 161 refusals and no
+  coverage.
+- **The model was filled *after* creating.** With the model full, a create left a
+  real, untracked file in the volume while the model believed the directory was
+  empty; the next `rmdir` was then refused, and reported as an unexplained EIO.
+- **A refusal was assumed to mean "nothing changed".** It does not: the errno
+  says what a refusal implies (`ENOTEMPTY` → still there, `ENOENT` → gone,
+  anything else → unknown, adopt reality). Guessing produced "model dir vanished"
+  for an rmdir correctly refused with `ENOENT`.
+
+Also: `create` answered **EIO for "volume full"** — only the `write` op knew about
+`ENOSPC`, because seven write ops had each grown their own ad-hoc `strstr` chain
+and they had drifted. All seven now share one `err_to_errno()`, and the chain is
+gone.
+
+### Load-bearing
+
+Reverting the `bm_flag` refusal, the page-count refusal, and the shared
+`err_to_errno` each turn the lane red. The gate asserts absolute coverage floors
+(mounted, ops, accepted, per-class lines) so a short or empty run cannot pass,
+and a volume that refuses writes on purpose is counted as `nowrite`, not failed.
+
+---
+
 ## M16 — Write-path differential fuzz (2026-10-14)
 
 The write path (M13a/b, M14, M15) is pointer surgery — hash-chain splicing,
