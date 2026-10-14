@@ -2,7 +2,8 @@
 
 `amigafs` mounts **AmigaDOS File System** volumes — the `DOS\0`–`DOS\5` format
 used by Amiga floppy ADFs and RDB-partitioned hard-disk images — as an ordinary
-read-only Linux filesystem, via **FUSE3**, in C.
+Linux filesystem, via **FUSE3**, in C. Read-only by default; `-o rw` enables
+writes.
 
 It reads **OFS** (DOS\0, DOS\2, DOS\4), **FFS** (DOS\1, DOS\3, DOS\5),
 International mode and directory-cache volumes, on both floppy images and
@@ -66,10 +67,17 @@ remainder — rather than guessing at the rest.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `ro` | forced | The mount is read-only; no write operation is advertised. |
+| `ro` | **default** | Read-only. Every mutating op returns `EROFS` before resolving anything. |
+| `rw` | off | Allow writes: create, write, truncate, mkdir, unlink, rmdir, rename. |
 | `default_permissions` | on | The kernel enforces mode bits. |
 | `tz=local` | off | Interpret Amiga timestamps as local time instead of UTC. |
 | `amiga_ids` | off | Expose the stored 16-bit Amiga uid/gid instead of the mounting user's. |
+
+With `-o rw` the mount writes straight through to the image file, so writes are
+on disk the moment they are acknowledged. Renaming across RDB partitions
+returns `EXDEV` (two partitions are two volumes); `mv(1)` handles that itself.
+`chmod`/`chown`/`utimes` return `EPERM` — an AmigaDOS entry has nowhere to
+store them, and a silent success would be worse than a refusal.
 
 ## CLI
 
@@ -146,13 +154,18 @@ example, and the two traps worth knowing about.
 
 ## Known limits
 
-- **Writes go through the CLI, not the mount.** `afs put`/`afs mkdir` create
-  files and directories on scratch copies (never fixtures); `put` over a live
-  file truncates and rewrites it (fopen "w" semantics, grow/shrink/empty);
-  `afs rm` deletes files and empty dirs; `afs mv` renames/moves within one
-  volume (never across partitions). The FUSE mount stays read-only and never
-  writes. No rename across partitions, no link handling, no partial-range
-  writes yet.
+- **Links are not written.** Both `afs rm` and the mount's `unlink`/`rename`
+  refuse hard and soft links, and `afs mv` refuses to move them — the same set
+  ADFlib's `adfRemoveEntry`/`adfRenameEntry` handle (FILE/DIR only).
+- **No rename across partitions**, by design: block addresses are
+  partition-relative, so a cross-partition move is a copy+delete. The CLI
+  refuses it by name, the mount returns `EXDEV`.
+- **`chmod`/`chown`/`utimes` are refused** (`EPERM`) rather than silently
+  ignored. AmigaDOS has only the 16-bit Amiga uid/gid plus protection bits,
+  which map onto mode bits rather than being settable through POSIX calls.
+- **CLI writes are for scripting and scratch copies.** `afs put`/`mkdir`/`rm`/
+  `mv` operate on a volume path, never on a mount; use the mount with `-o rw`
+  for ordinary filesystem work.
 - **Directory hard links** are exposed as `ENOTDIR` rather than traversed —
   a hard-linked directory is a cycle the kernel dentry cache cannot represent.
   They are still listed.

@@ -24,6 +24,14 @@
 #   - negatives name the reason: unknown partition, bitmap without partition.
 set -uo pipefail
 
+# ADFlib's CLI is the oracle. Every other oracle gate puts it on PATH itself
+# (overridable with ADFLIB_BIN); this one did not, so it passed only when the
+# ambient PATH happened to have adfls/unadf in it and FAILED otherwise -- under
+# ctest, which does not inherit a shell's exports. A gate that fails for want
+# of an environment variable reads exactly like a real regression.
+ADFLIB_BIN="${ADFLIB_BIN:-$HOME/Work/adflib-oracle/ADFlib/build/examples}"
+export PATH="$ADFLIB_BIN:$PATH"
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 IMG="$ROOT/tests/fixtures/a590_WD93028XA_6parts.hdd"
@@ -53,6 +61,12 @@ if [ ! -x "$BIN/afs" ]; then
     echo "M12 gate: SKIP (build afs first)"
     exit 0
 fi
+for tool in adfls unadf rdbtool xdftool; do
+    if ! command -v "$tool" >/dev/null; then
+        echo "M12 gate: SKIP (oracle '$tool' not on PATH; set ADFLIB_BIN for ADFlib)"
+        exit 0
+    fi
+done
 
 # ---- 0. positive control: the floppy path still works ----------------------
 # adfls/unadf are the independent oracles; exact match, bytes included.

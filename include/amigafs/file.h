@@ -117,6 +117,17 @@ int afs_file_write_all(afs_volume_t *v, uint32_t hdrblock,
                        const void *data, size_t len,
                        char *errbuf, size_t errlen);
 
+/* Write `len` bytes at byte offset `off`, rewriting ONLY the blocks the span
+ * covers (plus the blocks whose OFS header must change). A write ending past
+ * EOF grows the file to off+len with the gap zero-filled (POSIX hole
+ * semantics); one ending at or before EOF leaves the size alone. Never
+ * shrinks, never moves a block, never rewrites a table whose entry list did
+ * not change. Allocating a new block is a real allocation, so a full volume
+ * fails with the file untouched. */
+int afs_file_write_range(afs_volume_t *v, uint32_t hdrblock,
+                         const void *data, size_t len, uint64_t off,
+                         char *errbuf, size_t errlen);
+
 /* Delete a file by name: unlink it from its directory chain, free every data
  * block, every extension block and the header itself, drop its dir-cache
  * record, and leave the bitmap exact. Refuses missing names, directories

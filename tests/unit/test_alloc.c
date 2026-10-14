@@ -355,6 +355,84 @@ static void test_rename_within_and_across(void) {
     free(img);
 }
 
+/* Partial-range writes (M15 RED): overwrite a span without touching the rest,
+ * append at exactly EOF, and extend past EOF with a zero-filled gap (POSIX).
+ * Sizes, tables and bitmap must all come out exact -- a range write that
+ * rewrites the whole file would still pass content checks, so the bitmap
+ * delta is asserted to prove only the needed blocks moved. */
+static void test_write_range_span(void) {
+    uint8_t *img = build_writable_img();
+    afs_volume_t *v = NULL;
+    uint32_t hdr = 0;
+    static uint8_t base[2000], patch[100], tail[48];
+    void *got = NULL;
+    size_t gotlen = 0, i;
+    uint8_t map[512];
+    uint32_t used_before = 0, used_after = 0, b;
+    for (i = 0; i < sizeof base; i++) base[i] = (uint8_t)(i & 0xFF);
+    for (i = 0; i < sizeof patch; i++) patch[i] = (uint8_t)(0xA0 + i);
+    for (i = 0; i < sizeof tail; i++) tail[i] = (uint8_t)(0x50 + i);
+    CHECK(img != NULL, "image allocated");
+    CHECK_EQ_U(afs_volume_open_memory(img, (size_t)IMG_BLOCKS * 512, 512,
+                                      &v, NULL, 0), 0, "volume opens");
+    CHECK_EQ_U(afs_file_create(v, IMG_ROOT, "rg", 2, &hdr, NULL, 0), 0, "create succeeds");
+    CHECK_EQ_U(afs_file_write_all(v, hdr, base, sizeof base, NULL, 0), 0, "write 2000");
+    CHECK_EQ_U(afs_bitmap_read(v, map, sizeof map), 1, "bitmap reads");
+    for (b = 0; b < IMG_BLOCKS; b++)
+        if (!afs_bitmap_test(map, b)) used_before++;
+    /* mid-span overwrite crossing a block boundary (600..700 spans 512+88) */
+    CHECK_EQ_U(afs_file_write_range(v, hdr, patch, sizeof patch, 600, NULL, 0), 0, "range write succeeds");
+    CHECK_EQ_U(afs_file_read_all(v, IMG_ROOT, "rg", 2, &got, &gotlen), 0, "reread succeeds");
+    CHECK_EQ_U(gotlen, sizeof base, "length unchanged by span write");
+    CHECK(got && memcmp(got, base, 600) == 0, "prefix intact");
+    CHECK(got && memcmp((uint8_t *)got + 600, patch, sizeof patch) == 0, "span replaced");
+    CHECK(got && memcmp((uint8_t *)got + 700, base + 700, sizeof base - 700) == 0, "suffix intact");
+    free(got); got = NULL;
+    /* append at exactly EOF grows by the tail */
+    CHECK_EQ_U(afs_file_write_range(v, hdr, tail, sizeof tail, sizeof base, NULL, 0), 0, "append at EOF");
+    CHECK_EQ_U(afs_file_read_all(v, IMG_ROOT, "rg", 2, &got, &gotlen), 0, "reread succeeds");
+    CHECK_EQ_U(gotlen, sizeof base + sizeof tail, "grown length matches");
+    CHECK(got && memcmp((uint8_t *)got + sizeof base, tail, sizeof tail) == 0, "tail bytes identical");
+    free(got); got = NULL;
+    CHECK_EQ_U(afs_bitmap_read(v, map, sizeof map), 1, "bitmap rereads");
+    for (b = 0; b < IMG_BLOCKS; b++)
+        if (!afs_bitmap_test(map, b)) used_after++;
+    CHECK_EQ_U(used_after, used_before, "span+append moved no extra blocks (4 data total)");
+    afs_volume_close(v);
+    free(img);
+}
+
+static void test_write_range_zero_gap(void) {
+    uint8_t *img = build_writable_img();
+    afs_volume_t *v = NULL;
+    uint32_t hdr = 0;
+    static uint8_t one[1] = { 0x7E };
+    void *got = NULL;
+    size_t gotlen = 0, i;
+    CHECK(img != NULL, "image allocated");
+    CHECK_EQ_U(afs_volume_open_memory(img, (size_t)IMG_BLOCKS * 512, 512,
+                                      &v, NULL, 0), 0, "volume opens");
+    CHECK_EQ_U(afs_file_create(v, IMG_ROOT, "gz", 2, &hdr, NULL, 0), 0, "create succeeds");
+    CHECK_EQ_U(afs_file_write_all(v, hdr, one, sizeof one, NULL, 0), 0, "write 1 byte");
+    /* write past EOF: the gap must read back as zeros (POSIX hole semantics) */
+    CHECK_EQ_U(afs_file_write_range(v, hdr, one, sizeof one, 1000, NULL, 0), 0, "gap write succeeds");
+    CHECK_EQ_U(afs_file_read_all(v, IMG_ROOT, "gz", 2, &got, &gotlen), 0, "reread succeeds");
+    CHECK_EQ_U(gotlen, 1001u, "size spans the gap");
+    if (got && gotlen == 1001) {
+        int zeros = 1;
+        CHECK(((uint8_t *)got)[0] == 0x7E, "first byte intact");
+        CHECK(((uint8_t *)got)[1000] == 0x7E, "written byte landed");
+        for (i = 1; i < 1000; i++)
+            if (((uint8_t *)got)[i] != 0) { zeros = 0; break; }
+        CHECK(zeros, "gap reads back zero-filled");
+    } else {
+        CHECK(0, "reread shape wrong");
+    }
+    free(got);
+    afs_volume_close(v);
+    free(img);
+}
+
 int main(void) {
     printf("alloc/write\n");
     test_write_backend_memory();
@@ -367,5 +445,7 @@ int main(void) {
     test_delete_file_frees_blocks();
     test_rmdir_and_refusals();
     test_rename_within_and_across();
+    test_write_range_span();
+    test_write_range_zero_gap();
     TEST_REPORT();
 }

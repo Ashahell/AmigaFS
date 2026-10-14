@@ -51,6 +51,7 @@ struct options {
     int amiga_ids;             /* expose stored 16-bit uid/gid (D7) */
     int local_tz;              /* interpret dates as local time (D6) */
     int foreground;
+    int rw;                    /* allow writes; default is a read-only mount */
 };
 
 static struct options g_opt;
@@ -478,10 +479,21 @@ static void afs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 /* open / read / readlink                                                   */
 /* ---------------------------------------------------------------------- */
 
+static int refuse_if_ro(fuse_req_t req);
+
+/* fi->fh carries the O_APPEND bit only; the block comes from the inode, as
+ * every read does. The kernel does NOT apply O_APPEND for us when writeback
+ * caching is off (fuse_lowlevel.h), so an appending write must redirect to the
+ * current end of file itself. Defined here because open() sets it too. */
+#define FH_APPEND 1u
+
 static void afs_ll_open(fuse_req_t req, fuse_ino_t ino,
                         struct fuse_file_info *fi) {
     if (IS_SYNTH(ino)) {
         if ((ino - SYNTH_BASE) % 2u == 0) { fuse_reply_err(req, EISDIR); return; }
+        /* the bitmap is DERIVED from the volume's own map blocks: writing it
+         * would not change anything a reader ever sees, so it stays read-only
+         * even on an rw mount */
         if ((fi->flags & O_ACCMODE) != O_RDONLY) {
             fuse_reply_err(req, EROFS);
             return;
@@ -504,9 +516,17 @@ static void afs_ll_open(fuse_req_t req, fuse_ino_t ino,
         return;
     }
     if ((fi->flags & O_ACCMODE) != O_RDONLY) {
-        fuse_reply_err(req, EROFS);
-        return;
+        if (refuse_if_ro(req)) return;
+        /* O_TRUNC on an open: POSIX says the open itself empties the file. */
+        if (fi->flags & O_TRUNC) {
+            char err[256] = {0};
+            if (afs_file_write_all(vol, blkno, NULL, 0, err, sizeof err) != 0) {
+                fuse_reply_err(req, EIO);
+                return;
+            }
+        }
     }
+    fi->fh = (fi->flags & O_APPEND) ? FH_APPEND : 0;
     fuse_reply_open(req, fi);
 }
 
@@ -597,6 +617,344 @@ static void afs_ll_readlink(fuse_req_t req, fuse_ino_t ino) {
     afs_softlink_translate(raw, 0, out, sizeof out);
     fuse_reply_readlink(req, out);
     free(raw);
+}
+
+/* ---------------------------------------------------------------------- */
+/* write operations                                                        */
+/* ---------------------------------------------------------------------- */
+
+/* Every mutating op refuses on a read-only mount FIRST, before it resolves a
+ * name or touches a block. A default mount therefore cannot be half-mutated
+ * by a path that fails late, and the refusal does not depend on whether the
+ * path happens to exist. */
+static int refuse_if_ro(fuse_req_t req) {
+    if (!g_opt.rw) { fuse_reply_err(req, EROFS); return 1; }
+    return 0;
+}
+
+/* AmigaDOS protection bit 0x4 is W, ACTIVE-LOW: set means "no write". Enforced
+ * on content mutation only (name operations are not gated on it) so a
+ * read-only file in an existing image cannot be rewritten through the mount
+ * just because the mount is rw. */
+#define AFSF_W 0x4u
+
+static int writable(afs_volume_t *vol, uint32_t blk, size_t bs) {
+    uint8_t *b = malloc(bs);
+    uint32_t prot;
+    if (!b) return 0;
+    if (afs_volume_read_block(vol, blk, b, bs) != 0) { free(b); return 0; }
+    prot = be32(b + bs - 192);
+    free(b);
+    return (prot & AFSF_W) == 0;
+}
+
+/* Resolve the directory block a mutating op must act inside.
+ * Returns 0 on success, or one of the reply codes below so each caller can
+ * forward it without inventing an errno. */
+static int parent_dirblock(fuse_ino_t parent, unsigned *vi, uint32_t *blk) {
+    if (parent == INO_ROOT) {
+        /* the mount root of an RDB image lists partitions; it is not a
+         * directory anyone can create in */
+        if (g_rdb_mode) return EOPNOTSUPP;
+        *vi = 0;
+        *blk = afs_volume_rootblock(g_parts[0].vol);
+        return 0;
+    }
+    if (IS_SYNTH(parent)) return EROFS;   /* .amigafs is derived, never written */
+    if (resolve_ino(parent, vi, blk) != 0) return ENOENT;
+    return 0;
+}
+
+/* Fill an entry param from a block: the same stat shape lookup hands back, so
+ * a freshly created file and a re-opened one are indistinguishable. Returns 0
+ * on success, -1 if the block cannot be read (caller owns the reply). */
+static int entry_for_block(unsigned vi, uint32_t blk,
+                           struct fuse_entry_param *e) {
+    afs_volume_t *vol = g_parts[vi].vol;
+    size_t bs = afs_volume_block_size(vol);
+    uint8_t *b = malloc(bs);
+    if (!b) return -1;
+    if (afs_volume_read_block(vol, blk, b, bs) != 0) { free(b); return -1; }
+    memset(e, 0, sizeof *e);
+    e->ino = INO_BLOCK(g_parts[vi].start + blk);
+    e->generation = 0;
+    e->attr_timeout = 0;      /* a block we just wrote has fresh attrs */
+    e->entry_timeout = 0;
+    afs_block_kind_t k = afs_block_kind(b, bs);
+    if (k == AFS_BLOCK_ROOT) {
+        synth_dir_stat(e->ino, &e->attr);
+    } else {
+        afs_fileheader_t h;
+        memset(&h, 0, sizeof h);
+        if (afs_parse_fileheader(b, bs, &h) != 0) memset(&h, 0, sizeof h);
+        fill_stat(&h, e->ino, kind_to_mode(k), &e->attr);
+        if (e->attr.st_mode == 0) e->attr.st_mode = S_IFREG | 0644;
+    }
+    free(b);
+    return 0;
+}
+
+/* Entry reply for a block we just created or found. `created` must be non-zero
+ * ONLY from the create op, which owes the kernel an open reply too --
+ * fuse_reply_entry there leaves the create request half-answered, and the
+ * first write afterwards fails with EINVAL from libfuse ("writing device:
+ * Invalid argument") with no diagnostic anywhere near the cause. */
+static void reply_entry_block(fuse_req_t req, unsigned vi, uint32_t blk,
+                              struct fuse_file_info *fi, int created) {
+    struct fuse_entry_param e;
+    if (entry_for_block(vi, blk, &e) != 0) { fuse_reply_err(req, EIO); return; }
+    if (created) fuse_reply_create(req, &e, fi);
+    else         fuse_reply_entry(req, &e);
+}
+
+static void afs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *name,
+                          mode_t mode, struct fuse_file_info *fi) {
+    (void)mode;
+    if (refuse_if_ro(req)) return;
+    unsigned vi = 0;
+    uint32_t pblk = 0, hdr = 0;
+    int rc = parent_dirblock(parent, &vi, &pblk);
+    if (rc != 0) { fuse_reply_err(req, rc); return; }
+    afs_volume_t *vol = g_parts[vi].vol;
+    char err[256] = {0};
+    afs_dirent_t existing;
+
+    if (afs_dir_lookup(vol, pblk, name, strlen(name), &existing) == 0) {
+        /* POSIX open(O_CREAT) without O_EXCL on an existing file just opens it;
+         * O_EXCL is an error. O_TRUNC empties it (same fopen "w" path the CLI
+         * uses, so a truncating open cannot leave a stale tail). */
+        if (fi->flags & O_EXCL) { fuse_reply_err(req, EEXIST); return; }
+        if (fi->flags & O_TRUNC) {
+            if (afs_file_write_all(vol, existing.block, NULL, 0,
+                                   err, sizeof err) != 0) {
+                fuse_reply_err(req, EIO);
+                return;
+            }
+        }
+        fi->fh = (fi->flags & O_APPEND) ? FH_APPEND : 0;
+        reply_entry_block(req, vi, existing.block, fi, 1);
+        return;
+    }
+
+    if (afs_file_create(vol, pblk, name, strlen(name), &hdr,
+                        err, sizeof err) != 0) {
+        fuse_reply_err(req, strstr(err, "exists") ? EEXIST
+                        : strstr(err, "name") ? EINVAL : EIO);
+        return;
+    }
+    fi->fh = (fi->flags & O_APPEND) ? FH_APPEND : 0;
+    reply_entry_block(req, vi, hdr, fi, 1);
+}
+
+static void afs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf,
+                         size_t size, off_t off, struct fuse_file_info *fi) {
+    if (refuse_if_ro(req)) return;
+    if (off < 0) { fuse_reply_err(req, EIO); return; }
+    if (size == 0) { fuse_reply_write(req, 0); return; }
+    unsigned vi = 0;
+    uint32_t blk = 0;
+    if (resolve_ino(ino, &vi, &blk) != 0) { fuse_reply_err(req, ENOENT); return; }
+    afs_volume_t *vol = g_parts[vi].vol;
+    size_t bs = afs_volume_block_size(vol);
+    if (!writable(vol, blk, bs)) { fuse_reply_err(req, EACCES); return; }
+
+    uint64_t at = (uint64_t)off;
+    if (fi && (fi->fh & FH_APPEND)) {
+        uint8_t *hb = malloc(bs);
+        if (!hb) { fuse_reply_err(req, ENOMEM); return; }
+        if (afs_volume_read_block(vol, blk, hb, bs) != 0) {
+            free(hb);
+            fuse_reply_err(req, EIO);
+            return;
+        }
+        at = be32(hb + bs - 188);
+        free(hb);
+    }
+
+    char err[256] = {0};
+    if (afs_file_write_range(vol, blk, buf, size, at, err, sizeof err) != 0) {
+        /* a full volume is the common real failure and deserves its own errno;
+         * everything else here is an I/O or structure refusal */
+        fuse_reply_err(req, strstr(err, "full") || strstr(err, "space")
+                            ? ENOSPC : EIO);
+        return;
+    }
+    fuse_reply_write(req, size);
+}
+
+static void afs_ll_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name,
+                         mode_t mode) {
+    (void)mode;
+    if (refuse_if_ro(req)) return;
+    unsigned vi = 0;
+    uint32_t pblk = 0, nb = 0;
+    int rc = parent_dirblock(parent, &vi, &pblk);
+    if (rc != 0) { fuse_reply_err(req, rc); return; }
+    char err[256] = {0};
+    if (afs_dir_mkdir(g_parts[vi].vol, pblk, name, strlen(name), &nb,
+                      err, sizeof err) != 0) {
+        fuse_reply_err(req, strstr(err, "exists") ? EEXIST
+                        : strstr(err, "name") ? EINVAL : EIO);
+        return;
+    }
+    reply_entry_block(req, vi, nb, NULL, 0);
+}
+
+static void afs_ll_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
+    if (refuse_if_ro(req)) return;
+    unsigned vi = 0;
+    uint32_t pblk = 0;
+    int rc = parent_dirblock(parent, &vi, &pblk);
+    if (rc != 0) { fuse_reply_err(req, rc); return; }
+    afs_volume_t *vol = g_parts[vi].vol;
+    afs_dirent_t e;
+    if (afs_dir_lookup(vol, pblk, name, strlen(name), &e) != 0) {
+        fuse_reply_err(req, ENOENT);
+        return;
+    }
+    char err[256] = {0};
+    if (e.kind == AFS_BLOCK_FILE) {
+        if (afs_file_delete(vol, pblk, name, strlen(name), err, sizeof err) != 0) {
+            fuse_reply_err(req, EIO);
+            return;
+        }
+    } else if (e.kind == AFS_BLOCK_DIR) {
+        if (afs_dir_rmdir(vol, pblk, name, strlen(name), err, sizeof err) != 0) {
+            /* non-empty is ENOTEMPTY, not EIO: `rm -r` and every POSIX caller
+             * branch on it */
+            fuse_reply_err(req, strstr(err, "not empty") ? ENOTEMPTY : EIO);
+            return;
+        }
+    } else {
+        fuse_reply_err(req, strstr(err, "link") ? EOPNOTSUPP : EISDIR);
+        return;
+    }
+    fuse_reply_err(req, 0);
+}
+
+static void afs_ll_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
+    if (refuse_if_ro(req)) return;
+    unsigned vi = 0;
+    uint32_t pblk = 0;
+    int rc = parent_dirblock(parent, &vi, &pblk);
+    if (rc != 0) { fuse_reply_err(req, rc); return; }
+    afs_volume_t *vol = g_parts[vi].vol;
+    char err[256] = {0};
+    if (afs_dir_rmdir(vol, pblk, name, strlen(name), err, sizeof err) != 0) {
+        fuse_reply_err(req, strstr(err, "not empty") ? ENOTEMPTY
+                        : strstr(err, "not found") ? ENOENT
+                        : strstr(err, "not a directory") ? ENOTDIR : EIO);
+        return;
+    }
+    fuse_reply_err(req, 0);
+}
+
+static void afs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
+                          fuse_ino_t newparent, const char *newname,
+                          unsigned int flags) {
+    if (refuse_if_ro(req)) return;
+    /* RENAME_NOREPLACE / RENAME_EXCHANGE need a two-name transaction we do
+     * not have; say so rather than doing a plain rename under a flag that
+     * promises something else (a plain rename here would silently overwrite
+     * for NOREPLACE and silently do nothing for EXCHANGE). */
+    if (flags != 0) { fuse_reply_err(req, EINVAL); return; }
+    unsigned vi = 0, nvi = 0;
+    uint32_t sblk = 0, nblk = 0;
+    int rc = parent_dirblock(parent, &vi, &sblk);
+    if (rc != 0) { fuse_reply_err(req, rc); return; }
+    rc = parent_dirblock(newparent, &nvi, &nblk);
+    if (rc != 0) { fuse_reply_err(req, rc); return; }
+    /* Two partitions of one image are two volumes: a rename across them is a
+     * copy+delete, and POSIX says a rename that cannot be done in place fails
+     * with EXDEV (GNU mv falls back by itself on seeing it). */
+    if (vi != nvi) { fuse_reply_err(req, EXDEV); return; }
+
+    char err[256] = {0};
+    if (afs_dir_rename(g_parts[vi].vol, sblk, name, strlen(name),
+                       nblk, newname, strlen(newname), err, sizeof err) != 0) {
+        fuse_reply_err(req, strstr(err, "not found") ? ENOENT
+                        : strstr(err, "exists") ? EEXIST
+                        : strstr(err, "itself") ? EINVAL
+                        : strstr(err, "name") ? EINVAL : EIO);
+        return;
+    }
+    fuse_reply_err(req, 0);
+}
+
+/* setattr: size changes are real writes; everything else (mode, owner, times)
+ * has nowhere to live in an AmigaDOS entry and is refused rather than
+ * silently ignored -- a caller that chmods and believes it worked is worse
+ * than one that gets EPERM. */
+static void afs_ll_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
+                           int to_set, struct fuse_file_info *fi) {
+    (void)fi;
+    if (to_set & ~(FUSE_SET_ATTR_SIZE)) { fuse_reply_err(req, EPERM); return; }
+    if (!(to_set & FUSE_SET_ATTR_SIZE)) {
+        /* even a no-op setattr owes the kernel its attrs (see below) */
+        unsigned vi0 = 0;
+        uint32_t blk0 = 0;
+        struct fuse_entry_param e;
+        if (resolve_ino(ino, &vi0, &blk0) != 0) { fuse_reply_err(req, ENOENT); return; }
+        if (entry_for_block(vi0, blk0, &e) != 0) { fuse_reply_err(req, EIO); return; }
+        fuse_reply_attr(req, &e.attr, e.attr_timeout);
+        return;
+    }
+    if (refuse_if_ro(req)) return;
+    unsigned vi = 0;
+    uint32_t blk = 0;
+    if (resolve_ino(ino, &vi, &blk) != 0) { fuse_reply_err(req, ENOENT); return; }
+    afs_volume_t *vol = g_parts[vi].vol;
+    size_t bs = afs_volume_block_size(vol);
+    if (!writable(vol, blk, bs)) { fuse_reply_err(req, EACCES); return; }
+    if (attr->st_size < 0) { fuse_reply_err(req, EINVAL); return; }
+
+    uint32_t want = (uint32_t)attr->st_size;
+    char err[256] = {0};
+    /* POSIX truncate: shrink drops the tail, grow zero-fills. Doing it as
+     * "read `want` bytes into a zeroed buffer, write them back" is exact for
+     * BOTH, and it reuses the one tested rewrite path (write_all) instead of
+     * adding a second truncate implementation that could disagree with it. */
+    uint8_t *buf = calloc(want ? want : 1, 1);
+    if (!buf) { fuse_reply_err(req, ENOMEM); return; }
+    size_t got = 0;
+    if (afs_read_file_by_block(vol, blk, buf, want, 0, &got) != 0) {
+        free(buf);
+        fuse_reply_err(req, EIO);
+        return;
+    }
+    if (afs_file_write_all(vol, blk, buf, want, err, sizeof err) != 0) {
+        free(buf);
+        fuse_reply_err(req, strstr(err, "full") || strstr(err, "space")
+                            ? ENOSPC : EIO);
+        return;
+    }
+    free(buf);
+    /* setattr MUST answer with the attributes, not a bare error code: the
+     * kernel's FUSE_SETATTR reply carries a struct attr_out, and replying with
+     * a zero-length error payload makes libfuse's write of the reply fail with
+     * EINVAL ("writing device: Invalid argument") -- the truncate appears to be
+     * refused by the filesystem while in fact it succeeded. */
+    {
+        struct fuse_entry_param e;
+        if (entry_for_block(vi, blk, &e) != 0) { fuse_reply_err(req, EIO); return; }
+        fuse_reply_attr(req, &e.attr, e.attr_timeout);
+    }
+}
+
+/* flush/release: no per-open state to flush (every write reached the image via
+ * pwrite before it replied) and nothing to keep alive, so both are success.
+ * They are here rather than NULL so the intent is explicit -- libfuse's
+ * defaults happen to be the same. */
+static void afs_ll_flush(fuse_req_t req, fuse_ino_t ino,
+                         struct fuse_file_info *fi) {
+    (void)ino; (void)fi;
+    fuse_reply_err(req, 0);
+}
+
+static void afs_ll_release(fuse_req_t req, fuse_ino_t ino,
+                           struct fuse_file_info *fi) {
+    (void)ino; (void)fi;
+    fuse_reply_err(req, 0);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -698,6 +1056,15 @@ static const struct fuse_lowlevel_ops afs_ll_ops = {
     .readdir  = afs_ll_readdir,
     .open     = afs_ll_open,
     .read     = afs_ll_read,
+    .create   = afs_ll_create,
+    .write    = afs_ll_write,
+    .setattr  = afs_ll_setattr,
+    .mkdir    = afs_ll_mkdir,
+    .unlink   = afs_ll_unlink,
+    .rmdir    = afs_ll_rmdir,
+    .rename   = afs_ll_rename,
+    .flush    = afs_ll_flush,
+    .release  = afs_ll_release,
     .readlink = afs_ll_readlink,
     .getxattr = afs_ll_getxattr,
     .listxattr= afs_ll_listxattr,
@@ -713,6 +1080,7 @@ enum {
 static const struct fuse_opt opts[] = {
     AMIGAFS_OPT("amiga_ids", amiga_ids),
     AMIGAFS_OPT("tz=local", local_tz),
+    AMIGAFS_OPT("rw", rw),
     AMIGAFS_OPT("-f", foreground),
     FUSE_OPT_END
 };
@@ -770,8 +1138,15 @@ static int open_image(const char *image, char *err, size_t errlen) {
             afs_volume_t *v = NULL;
             char e[256] = {0};
             /* a partition whose length the RDB does not state runs to the end */
-            if (afs_volume_open_window(image, 512, p->start_block, p->size_blocks,
-                                       &v, e, sizeof e) != 0) {
+            /* `rw` picks the writable backend, which goes to the image file
+             * with pwrite instead of to the in-memory copy read above (that
+             * copy exists only to sniff the RDB and is freed here). */
+            int rc = g_opt.rw
+                ? afs_volume_open_window_rw(image, 512, p->start_block,
+                                            p->size_blocks, &v, e, sizeof e)
+                : afs_volume_open_window(image, 512, p->start_block,
+                                         p->size_blocks, &v, e, sizeof e);
+            if (rc != 0) {
                 snprintf(err, errlen, "partition '%s': %s", p->name, e);
                 free(img);
                 close_all();
@@ -795,7 +1170,10 @@ static int open_image(const char *image, char *err, size_t errlen) {
     free(img);
 
     afs_volume_t *v = NULL;
-    if (afs_volume_open_file(image, 512, 0, &v, err, errlen) != 0) return -1;
+    int orc = g_opt.rw
+        ? afs_volume_open_window_rw(image, 512, 0, 0, &v, err, errlen)
+        : afs_volume_open_file(image, 512, 0, &v, err, errlen);
+    if (orc != 0) return -1;
     g_parts[0].vol = v;
     g_parts[0].start = 0;
     g_parts[0].size = afs_volume_block_count(v);

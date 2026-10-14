@@ -409,6 +409,40 @@ int afs_file_create(afs_volume_t *v, uint32_t dirblock,
     return 0;
 }
 
+/* Stamp the new size + timestamp into the header, write it, and refresh the
+ * dir-cache record. Shared by write_all and write_range so the two can never
+ * disagree about what a "finished write" means (the cache record carries the
+ * size a `ls` will report). */
+static int finish_write(afs_volume_t *v, uint32_t hdrblock, uint8_t *hdr,
+                        size_t bs, uint32_t parent, uint32_t size,
+                        char *errbuf, size_t errlen) {
+    uint32_t dd, mm, tt;
+    afs_dircache_rec_t rec;
+
+    afs_now_amiga(&dd, &mm, &tt);
+    put_be32(hdr + bs - 188, size);
+    put_be32(hdr + bs - 92, dd);
+    put_be32(hdr + bs - 88, mm);
+    put_be32(hdr + bs - 84, tt);
+    put_be32(hdr + 20, afs_block_checksum(hdr, bs, 20));
+    if (afs_volume_write_block(v, hdrblock, hdr, bs) != 0) {
+        set_err(errbuf, errlen, "cannot flush file header");
+        return -1;
+    }
+    memset(&rec, 0, sizeof rec);
+    rec.header = hdrblock;
+    rec.size = size;
+    rec.days = (int16_t)dd; rec.mins = (int16_t)mm; rec.ticks = (int16_t)tt;
+    rec.sec_type = (uint8_t)AFS_ST_FILE;
+    {
+        char nm[AFS_NAME_MAX];
+        bstr(hdr + bs - 80, 31, nm, sizeof nm);
+        memcpy(rec.name, nm, strlen(nm) < 30 ? strlen(nm) : 30);
+    }
+    /* upsert already named the reason in errbuf if it fails; keep it */
+    return afs_dircache_upsert(v, parent, &rec, NULL, 0, errbuf, errlen);
+}
+
 int afs_file_write_all(afs_volume_t *v, uint32_t hdrblock,
                        const void *data, size_t len,
                        char *errbuf, size_t errlen) {
@@ -416,7 +450,6 @@ int afs_file_write_all(afs_volume_t *v, uint32_t hdrblock,
     uint8_t *hdr = NULL;
     uint32_t nblocks, ntables;
     uint32_t *ext = NULL, *dblks = NULL;
-    uint32_t dd, mm, tt;
     uint32_t parent;
 
     if (!v) { set_err(errbuf, errlen, "bad arguments"); return -1; }
@@ -596,33 +629,9 @@ write_done:;
     }
 
 
-    afs_now_amiga(&dd, &mm, &tt);
-    put_be32(hdr + bs - 188, (uint32_t)len);
-    put_be32(hdr + bs - 92, dd);
-    put_be32(hdr + bs - 88, mm);
-    put_be32(hdr + bs - 84, tt);
-    put_be32(hdr + 20, afs_block_checksum(hdr, bs, 20));
-    if (afs_volume_write_block(v, hdrblock, hdr, bs) != 0) {
-        set_err(errbuf, errlen, "cannot flush file header");
+    if (finish_write(v, hdrblock, hdr, bs, parent, (uint32_t)len,
+                     errbuf, errlen) != 0)
         goto fail;
-    }
-    {
-        afs_dircache_rec_t rec;
-        memset(&rec, 0, sizeof rec);
-        rec.header = hdrblock;
-        rec.size = (uint32_t)len;
-        rec.days = (int16_t)dd; rec.mins = (int16_t)mm; rec.ticks = (int16_t)tt;
-        rec.sec_type = (uint8_t)AFS_ST_FILE;
-        {
-            char nm[AFS_NAME_MAX];
-            bstr(hdr + bs - 80, 31, nm, sizeof nm);
-            memcpy(rec.name, nm, strlen(nm) < 30 ? strlen(nm) : 30);
-        }
-        if (afs_dircache_upsert(v, parent, &rec, NULL, 0, errbuf, errlen) != 0) {
-            /* upsert already named the reason in errbuf; keep it */
-            goto fail;
-        }
-    }
     free(ext);
     free(dblks);
     free(hdr);
@@ -636,6 +645,236 @@ fail:
      * links at all. */
     free(ext);
     free(dblks);
+    free(hdr);
+    return -1;
+}
+
+/* Write `len` bytes at byte offset `off`, leaving every other byte, block
+ * placement and table entry untouched.
+ *
+ * This is NOT write_all over a re-read buffer. Only the blocks the span
+ * actually covers are rewritten, plus the blocks whose OFS header must change
+ * (a new block needs one; the previously-last block needs its `next` and
+ * `data_size` fixed when the file grows past it). Tables are left alone
+ * entirely unless the block COUNT changed -- which is the whole point: a
+ * 4 KiB patch into the middle of a 1 MiB file must not rewrite its tables or
+ * move a single block.
+ *
+ * Beyond EOF the gap reads back as zeros (POSIX hole semantics): newly
+ * allocated blocks are zero-filled, and their OFS `data_size` is the full
+ * payload so a reader takes all of it as file data rather than stopping short.
+ * A write that ends past EOF grows the file to `off + len`; a write that ends
+ * at or before EOF leaves the size alone (ftruncate-style shortening is
+ * write_all with a shorter buffer, which is the CLI's `put`, not this).
+ *
+ * Allocation order is the same discipline as write_all: every deficit block is
+ * allocated BEFORE any mutation, so a full volume fails with the file exactly
+ * as it was. Surplus (only possible when... never: this never shrinks) is
+ * freed after every write succeeded.
+ */
+int afs_file_write_range(afs_volume_t *v, uint32_t hdrblock,
+                         const void *data, size_t len, uint64_t off,
+                         char *errbuf, size_t errlen) {
+    size_t bs, payload, entries, dataoff;
+    uint8_t *hdr = NULL, *db = NULL;
+    uint32_t old_size, old_n, new_n, ntables, keep, need_data;
+    uint32_t reuse_ext, need_ext, parent, i;
+    uint32_t *old_data = NULL, *old_ext = NULL, *final_data = NULL, *ext = NULL;
+    size_t old_ext_n = 0;
+    uint64_t new_size;
+    size_t first, skip0, nspan;
+    const uint8_t *src = (const uint8_t *)data;
+    int is_ofs;
+
+    if (!v || (len > 0 && !data)) { set_err(errbuf, errlen, "bad arguments"); return -1; }
+    /* POSIX: a zero-byte write changes nothing, not even a hole */
+    if (len == 0) return 0;
+    if (off > 0xFFFFFFFFu || len > 0xFFFFFFFFu ||
+        off + (uint64_t)len > 0xFFFFFFFFu) {
+        set_err(errbuf, errlen, "file too large (past 4 GiB)");
+        return -1;
+    }
+
+    bs = afs_volume_block_size(v);
+    payload = data_payload(v, bs);
+    entries = table_entries(bs);
+    is_ofs = afs_volume_is_ofs(v);
+    dataoff = is_ofs ? 24 : 0;
+
+    hdr = malloc(bs);
+    if (!hdr) { set_err(errbuf, errlen, "out of memory"); return -1; }
+    if (afs_volume_read_block(v, hdrblock, hdr, bs) != 0) {
+        free(hdr);
+        set_err(errbuf, errlen, "cannot read file header %u", hdrblock);
+        return -1;
+    }
+    if (afs_block_kind(hdr, bs) != AFS_BLOCK_FILE) {
+        free(hdr);
+        set_err(errbuf, errlen, "block %u is not a plain file", hdrblock);
+        return -1;
+    }
+    parent = be32(hdr + bs - 12);
+    old_size = be32(hdr + bs - 188);
+    old_n = (old_size == 0) ? 0
+        : (uint32_t)(((uint64_t)old_size + payload - 1) / payload);
+    new_size = (off + (uint64_t)len > old_size) ? off + (uint64_t)len : old_size;
+    new_n = (uint32_t)((new_size + payload - 1) / payload);
+    ntables = (new_n <= entries) ? 1
+        : 1 + (uint32_t)((new_n - entries + entries - 1) / entries);
+
+    if (old_n > 0) {
+        uint32_t *el = NULL;
+        size_t en = 0;
+        if (collect_ext_blocks(v, hdr, bs, &el, &en, errbuf, errlen) != 0) {
+            free(hdr);
+            return -1;
+        }
+        old_ext = el;
+        old_ext_n = en;
+        if (collect_blocks(v, hdrblock, old_n, &old_data) != 0) {
+            free(old_ext); free(hdr);
+            set_err(errbuf, errlen, "cannot read existing data blocks");
+            return -1;
+        }
+    }
+
+    keep = old_n < new_n ? old_n : new_n;
+    need_data = new_n - keep;
+    reuse_ext = old_ext_n < (size_t)(ntables - 1)
+        ? (uint32_t)old_ext_n : (uint32_t)(ntables - 1);
+    need_ext = (uint32_t)(ntables - 1) - reuse_ext;
+
+    final_data = malloc(new_n ? new_n * sizeof *final_data : 1);
+    ext = calloc(ntables > 1 ? (size_t)(ntables - 1) : 1, sizeof *ext);
+    db = malloc(bs);
+    if (!final_data || !ext || !db) {
+        free(final_data); free(ext); free(db); free(old_data); free(old_ext);
+        free(hdr);
+        set_err(errbuf, errlen, "out of memory");
+        return -1;
+    }
+    for (i = 0; i < keep; i++) final_data[i] = old_data[i];
+    for (i = 0; i < reuse_ext; i++) ext[i] = old_ext[i];
+    /* deficit first: the volume is still exactly as it was until these all
+     * succeed, so a full volume leaves the file untouched */
+    for (i = 0; i < need_ext; i++)
+        if (afs_alloc_block(v, &ext[reuse_ext + i], errbuf, errlen) != 0)
+            goto fail_range;
+    for (i = 0; i < need_data; i++)
+        if (afs_alloc_block(v, &final_data[keep + i], errbuf, errlen) != 0)
+            goto fail_range;
+
+    first = (size_t)(off / payload);
+    skip0 = (size_t)(off % payload);
+    nspan = (skip0 + len + payload - 1) / payload;
+
+    /* data blocks: only those that need a byte changed or a header fixed */
+    for (i = 0; i < new_n; i++) {
+        int is_new = (i >= old_n);
+        size_t j;
+        int in_span = ((size_t)i >= first && (size_t)i < first + nspan);
+        /* growing past a block makes it interior: its data_size and next
+         * pointer are stale even though none of its bytes changed */
+        int patch_prev_last = (old_n > 0 && i == old_n - 1 && new_n > old_n);
+        if (!is_new && !in_span && !patch_prev_last) continue;
+        if (is_new) memset(db, 0, bs);
+        else if (afs_volume_read_block(v, final_data[i], db, bs) != 0) {
+            set_err(errbuf, errlen, "cannot read data block %u", final_data[i]);
+            goto fail_range;
+        }
+        /* Splice this block's share of `src`. `j` is the block's index within the
+         * span; src byte g maps to file byte off+g, i.e. block start + g, so
+         * the first src index landing here is max(0, j*payload - skip0) and
+         * the byte's offset WITHIN the block is skip0 + start_g - j*payload
+         * (skip0 for the first block, 0 for every later one). */
+        for (j = 0; in_span && j < nspan; j++) {
+            size_t start_g, in_block, n;
+            if (first + j != i) continue;
+            start_g = (j * payload > skip0) ? j * payload - skip0 : 0;
+            in_block = skip0 + start_g - j * payload;
+            n = len - start_g;
+            if (n > payload - in_block) n = payload - in_block;
+            memcpy(db + dataoff + in_block, src + start_g, n);
+        }
+        if (is_ofs) {
+            uint32_t have = (uint32_t)(new_size - (uint64_t)i * payload);
+            if (have > (uint32_t)payload) have = (uint32_t)payload;
+            put_be32(db + 0, AFS_T_DATA);
+            put_be32(db + 4, hdrblock);
+            put_be32(db + 8, i + 1);
+            put_be32(db + 12, have);
+            put_be32(db + 16, (i + 1 < new_n) ? final_data[i + 1] : 0);
+            put_be32(db + 20, afs_block_checksum(db, bs, 20));
+        }
+        if (afs_volume_write_block(v, final_data[i], db, bs) != 0) {
+            set_err(errbuf, errlen, "cannot write data block");
+            goto fail_range;
+        }
+    }
+
+    /* tables: rewritten only when the block count changed. Same reversed
+     * fill and zeroed slot area as write_all, for the same reason (salvage
+     * tools follow stale pointers in a reused, shorter table). */
+    if (new_n != old_n || (size_t)(ntables - 1) != old_ext_n) {
+        for (i = 0; i < ntables; i++) {
+            uint8_t *tb;
+            size_t tb_first = (size_t)i * entries;
+            size_t count = (size_t)new_n - tb_first;
+            uint32_t tblk;
+            size_t k2;
+            if (count > entries) count = entries;
+            if (i == 0) {
+                tb = hdr;
+                tblk = hdrblock;
+            } else {
+                tb = calloc(1, bs);
+                if (!tb) { set_err(errbuf, errlen, "out of memory"); goto fail_range; }
+                tblk = ext[i - 1];
+                put_be32(tb + 0, AFS_T_LIST);
+                put_be32(tb + 4, tblk);
+                put_be32(tb + bs - 4, AFS_ST_FILE);
+                put_be32(tb + bs - 12, hdrblock);
+                put_be32(tb + bs - 8, (i + 1 < ntables) ? ext[i] : 0);
+            }
+            memset(tb + 24, 0, entries * 4);
+            for (k2 = 0; k2 < count; k2++)
+                put_be32(tb + 24 + 4 * (entries - 1 - k2), final_data[tb_first + k2]);
+            put_be32(tb + 8, (uint32_t)count);
+            if (i == 0)
+                put_be32(tb + bs - 8, ntables > 1 ? ext[0] : 0);
+            put_be32(tb + 20, afs_block_checksum(tb, bs, 20));
+            if (afs_volume_write_block(v, tblk, tb, bs) != 0) {
+                if (i != 0) free(tb);
+                set_err(errbuf, errlen, "cannot write file table");
+                goto fail_range;
+            }
+            if (i != 0) free(tb);
+        }
+        put_be32(hdr + 16, new_n ? final_data[0] : 0);
+    }
+
+    free(old_data);
+    free(old_ext);
+    if (finish_write(v, hdrblock, hdr, bs, parent, (uint32_t)new_size,
+                     errbuf, errlen) != 0) {
+        free(ext); free(final_data); free(db); free(hdr);
+        return -1;
+    }
+    free(ext);
+    free(final_data);
+    free(db);
+    free(hdr);
+    return 0;
+
+fail_range:
+    /* No transactions: blocks allocated before an I/O failure stay allocated
+     * but unreferenced (`afs verify` reports the volume as it is). Nothing is
+     * ever half-LINKED -- linking happened once at create. */
+    free(old_data);
+    free(old_ext);
+    free(ext);
+    free(final_data);
+    free(db);
     free(hdr);
     return -1;
 }

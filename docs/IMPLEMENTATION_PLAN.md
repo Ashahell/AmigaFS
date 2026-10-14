@@ -338,6 +338,73 @@ grow/shrink/empty cases (80 checks).
 
 ---
 
+## M15 — Partial-range writes + FUSE write ops (2026-10-14)
+
+Two pieces. The library gained `afs_file_write_range` (write `len` bytes at
+byte offset `off`), and the FUSE shell gained `-o rw`: `create`, `write`,
+`setattr` (size only), `mkdir`, `unlink`, `rmdir`, `rename`, `flush`,
+`release`. Default mount is still read-only — every op refuses with EROFS
+*first*, before resolving a name, so a read-only mount cannot be half-mutated
+by a path that fails late.
+
+`afs_file_write_range` is NOT "read the file, splice, write it all back". Only
+the blocks the span covers are rewritten, plus the blocks whose OFS header must
+change: a newly allocated block needs one, and when a write grows the file past
+a block, that block's `data_size` and `next` pointer are stale even though none
+of its bytes changed. Tables are left alone unless the block COUNT changed —
+which is the point: a 4 KiB patch into a 1 MiB file moves no block and rewrites
+no table. Past-EOF gaps read back as zeros (POSIX hole semantics), with a gap
+block's OFS `data_size` set to the full payload so a reader takes all of it as
+file data. Allocation order matches write_all: deficits allocated before any
+mutation, so a full volume fails with the file untouched. `finish_write()`
+(header stamp + dir-cache refresh) is shared by both writers so they cannot
+disagree about what a finished write means.
+
+Three FUSE details cost a debugging round each, all worth recording:
+
+1. **`create` must reply with `fuse_reply_create`, not `fuse_reply_entry`.**
+   `fuse_reply_entry` leaves the request half-answered and libfuse's first
+   write afterwards fails with `fuse: writing device: Invalid argument` — an
+   error from the *reply writer*, with nothing pointing at the cause.
+2. **`setattr` must reply with `fuse_reply_attr`, not `fuse_reply_err(0)`.**
+   Same shape of failure, same misleading message. A truncate that fully
+   succeeded appeared to be refused by the filesystem.
+3. **O_APPEND is ours to implement.** `fuse_lowlevel.h` states that with
+   writeback caching disabled the filesystem must ensure each write appends.
+   We clear `FUSE_CAP_WRITEBACK_CACHE` in init, so `fi->fh` carries the
+   O_APPEND bit and `write` redirects to the current end of file.
+
+**Gate: `m15_fuse_write.sh` PASS (16 checks).** POSIX flows through the KERNEL
+(`cp`, `>>`, `O_TRUNC`, `truncate -s`, `mkdir`, `rm`, `rmdir`, `mv`), so dentry
+translation and flag handling actually run — a library-only test cannot see
+them. Bytes oracle-diffed with `unadf` after unmount; `verify` clean. A default
+mount refuses all four write ops with **EROFS specifically**, not merely "it
+failed", and the whole image is sha256-identical afterwards. `rename` across
+RDB partitions returns **EXDEV**, asserted through `os.rename` directly because
+GNU `mv(1)` catches EXDEV and falls back to copy+delete — a shell-level refusal
+test would fail on correct code (the fallback path is asserted by end state
+instead). `rename(a, a)` succeeds as a POSIX no-op, also asserted through
+`os.rename` for the same reason (`mv` short-circuits it itself).
+
+**Mutant findings.** Blinding the `g_opt.rw` switch left the gate GREEN at
+first: the ro cases still failed, just with EIO instead of EROFS, because the
+write got through the switch and died on a read-only blockdev. "Did it fail?"
+was the wrong assertion; the gate now checks the reason. Blinding the range
+splice's in-block offset was caught by the unit suite but NOT by the gate,
+because every gate case wrote whole files from offset 0 — the exact case that
+does not exercise splice arithmetic. Added section 2b: a `pwrite` at offset
+1234 into a 5000-byte file with the expected image computed independently, so
+exactly 15 bytes must change. Both mutants now red.
+
+Also fixed: `m12_cli_rdb.sh` used `adfls`/`unadf` without putting ADFlib on
+PATH (every other oracle gate does), so it passed only under a shell with the
+right exports and FAILED under ctest — a gate that fails for want of an
+environment variable reads exactly like a real regression. Fixed, and it now
+skips cleanly when an oracle is absent rather than reporting a false failure.
+Full ctest: 31/31.
+
+---
+
 ## M14 — Delete + rename (2026-10-14)
 
 `afs rm` (files + empty dirs) and `afs mv` (same-volume rename/move),
