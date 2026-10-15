@@ -32,7 +32,7 @@ static int usage(void) {
         "  afs info   <image> [partition]\n"
         "  afs ls     <image> [partition/dir] [-R]\n"
         "  afs cat    <image> <partition/path>\n"
-        "  afs verify <image> [--strict]\n"
+        "  afs verify <image> [--strict] [--orphans]\n"
         "  afs bitmap <image> <partition>\n"
         "  afs bitmap-rebuild <image> [--dry-run] [--yes]\n"
         "  afs put    <image> <partition/path> <local-file>\n"
@@ -825,11 +825,45 @@ static int cmd_mv(const char *image, const char *src, const char *dst) {
     return 0;
 }
 
-static int cmd_verify(const char *image, int strict) {
-    unsigned flags = strict ? AFS_VERIFY_STRICT : 0u;
+static int cmd_verify(const char *image, int strict, int orphans) {
+    /* The two extra checks are OPT-IN for the same reason, and it is worth
+     * stating it where a user will read it rather than only in a header:
+     *
+     *   --strict   every block the tree references must be marked allocated.
+     *              A stale map is ordinary on a real Amiga disk, so this is not
+     *              the default.
+     *   --orphans  every block marked allocated must be referenced by the tree.
+     *              Also ordinary on a real Amiga disk -- testofs.adf carries 364
+     *              of them (g1a30c 998, arccsh 550, testofs 303), and even blank.adf
+              * has 5 -- because
+     *              AmigaDOS returns a deleted file's blocks only when an
+     *              optimiser runs.
+     *
+     * Both are meaningful on a volume THIS TOOL WROTE, where a stale map or an
+     * unreferenced block is a bug rather than history. Neither is a statement
+     * about a downloaded image. */
+    unsigned flags = 0u;
+    if (strict) flags |= AFS_VERIFY_STRICT;
+    if (orphans) flags |= AFS_VERIFY_ORPHANS;
     size_t sz = 0;
     unsigned char *img = read_file(image, &sz);
-    afs_verify_report_t rep[256];
+    /* Sized to the volume, not fixed at 256. A fixed cap makes the REPORTED
+     * COUNT a lie: testffs.adf carries 238 orphans and testofs.adf more than
+     * 256, so at 256 the number stops counting and two different volumes (or
+     * the same volume before and after a write) report the same total. That is
+     * not theoretical -- it hid a mutant from m33's own gate, which compared
+     * "orphans before a write" with "orphans after" and got 256 both times
+     * while the true counts were 316 and 317.
+     *
+     * Heaped, because afs_verify_report_t is ~132 bytes and a stack array of
+     * this size is a real overflow. */
+    size_t nblk_est = sz / 512;
+    size_t rep_cap = nblk_est + 16;
+    if (rep_cap < 256) rep_cap = 256;
+    if (rep_cap > 65536) rep_cap = 65536;
+    afs_verify_report_t *rep = calloc(rep_cap, sizeof *rep);
+    if (!rep) { fprintf(stderr, "afs: out of memory\n"); free(img); return 1; }
+#define REP_CAP ((int)rep_cap)
     int n;
     if (!img) { fprintf(stderr, "afs: cannot open %s\n", image); return 1; }
 
@@ -855,7 +889,7 @@ static int cmd_verify(const char *image, int strict) {
                 total++;
                 continue;
             }
-            n = afs_verify_memory_ex(img + off, len, 512, rep, 256, flags);
+            n = afs_verify_memory_ex(img + off, len, 512, rep, REP_CAP, flags);
             if (n == 0) {
                 printf("%s [%s]: OK, no structural problems found\n",
                        image, p->name);
@@ -871,7 +905,7 @@ static int cmd_verify(const char *image, int strict) {
         return total == 0 ? 0 : 1;
     }
 
-    n = afs_verify_memory_ex(img, sz, 512, rep, 256, flags);
+    n = afs_verify_memory_ex(img, sz, 512, rep, REP_CAP, flags);
     if (n == 0) {
         printf("%s: OK, no structural problems found\n", image);
     } else {
@@ -944,10 +978,12 @@ int main(int argc, char **argv) {
 
     if (strcmp(cmd, "info") == 0)        return cmd_info(image, argc > 3 ? argv[3] : NULL);
     if (strcmp(cmd, "verify") == 0) {
-        int strict = 0;
-        for (int i = 3; i < argc; i++)
+        int strict = 0, orphans = 0;
+        for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "--strict") == 0) strict = 1;
-        return cmd_verify(image, strict);
+            else if (strcmp(argv[i], "--orphans") == 0) orphans = 1;
+        }
+        return cmd_verify(image, strict, orphans);
     }
     if (strcmp(cmd, "bitmap") == 0)      return cmd_bitmap(image, argc > 3 ? argv[3] : NULL);
     if (strcmp(cmd, "bitmap-rebuild") == 0) {

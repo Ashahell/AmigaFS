@@ -86,6 +86,8 @@ store them, and a silent success would be worse than a refusal.
 ./build/afs ls     disk.adf [dir] -R     # list a directory (recursively with -R)
 ./build/afs cat    disk.adf /path/to/file
 ./build/afs verify disk.adf [--strict]   # structure check; exit 1 on problems
+./build/afs verify disk.adf --orphans     # + blocks allocated but unreferenced
+                                         # (see below before trusting it)
 ./build/afs bitmap disk.adf              # free/used block summary
 ./build/afs bitmap-rebuild disk.adf --dry-run   # what a rebuild would reclaim
 ./build/afs bitmap-rebuild disk.adf --yes       # rebuild it (frees unreferenced blocks)

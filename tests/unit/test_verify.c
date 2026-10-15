@@ -694,8 +694,135 @@ static void test_verify_strict_sees_a_freed_dircache_block(void) {
                "the everyday check does not report it (stale maps are ordinary)");
 }
 
+/* --- M33: an ORPHAN -- allocated, and referenced by nothing --------------
+ *
+ * A leak is the one defect no structural check can catch (rule 266). M32 proved
+ * it: unlinking a link freed no block, and the volume verified clean in BOTH
+ * modes, because `--strict` checks only the other direction -- "referenced by
+ * the tree but marked free". Nothing anywhere looked at the reverse.
+ *
+ * The capability is added here, and it is OPT-IN for the same reason strict is:
+ * deleting a file in AmigaDOS leaves its data blocks allocated and unreferenced
+ * until a disk optimiser runs, so "allocated and unreferenced" is ORDINARY on a
+ * real Amiga disk and cannot be reported as damage by default. On a volume this
+ * project BUILT it is unambiguously a bug -- which is exactly the write fuzzer's
+ * situation, and the reason the flag exists.
+ *
+ * The orphan is planted rather than produced by a leak, because the assertion
+ * under test is "does the checker SEE it", and a checker that cannot detect the
+ * defect it exists for reports green forever (rule 249).
+ */
+/* THE BITMAP HAS TWO COORDINATE SPACES -- this is the fifth sighting of that
+ * bug kind, and the first inside test_verify.c's OWN helpers.
+ *
+ * `bm_set`/`bm_get` above address an ASSEMBLED map at offset 0 (what
+ * afs_bitmap_set/test take). A raw bitmap PAGE carries its own checksum long in
+ * bytes 0..3, so its map data starts at +4 and afs_bitmap_read assembles from
+ * `blk + 4`. Writing page bits with bm_set therefore writes them INTO THE
+ * CHECKSUM, which `put_be32(blk, checksum, 0)` then overwrites -- so every bit
+ * for blocks 0..31 silently became "allocated" and the planted orphan was
+ * reported as nine unrelated orphans. `bm_build` has the same flaw.
+ *
+ * The rule from M24/M28/M29 and now this: when touching bitmap code, NAME THE
+ * SPACE in the comment. These helpers are named for the assembled map.
+ */
+static void page_set(uint8_t *page, uint32_t blk) {
+    uint8_t *p = page + 4 + (blk / 32) * 4 + (blk % 32) / 8;
+    *p |= (uint8_t)(0x80 >> (blk % 8));
+}
+
+static void build_vol_with_orphan(uint8_t *img, size_t imgsz, int leak) {
+    memset(img, 0, imgsz);
+    put_be32(img, ((uint32_t)'D' << 24) | ((uint32_t)'O' << 16) |
+                  ((uint32_t)'S' << 8) | 0x01);          /* FFS */
+    uint8_t *r = img + 8 * BS;                           /* rootblock */
+    put_be32(r + 0, AFS_T_HEADER);
+    put_be32(r + 12, (uint32_t)afs_hash_table_size(BS));
+    put_be32(r + BS - 200, 0xFFFFFFFFu);
+    put_be32(r + BS - 196, 9);                            /* bitmap at 9 */
+    put_be32(r + BS - 96, 0);
+    put_be32(r + BS - 8, 0);
+    r[BS - 80] = 3; memcpy(r + BS - 79, "vol", 3);
+    put_be32(r + BS - 4, AFS_ST_ROOT);
+
+    /* block 11: a file, reachable from the rootblock's hash table */
+    uint8_t *fh = img + 11 * BS;
+    put_be32(fh + 0, AFS_T_HEADER);
+    put_be32(fh + 4, 11);
+    put_be32(fh + BS - 188, 0);                           /* no data */
+    fh[BS - 80] = 1; memcpy(fh + BS - 79, "f", 1);
+    put_be32(fh + BS - 12, 8);
+    put_be32(fh + BS - 16, 0);
+    put_be32(fh + BS - 4, AFS_ST_FILE);
+    put_be32(fh + 20, afs_block_checksum(fh, BS, 20));
+
+    /* slot 0 of the hash table -> block 11, so the file is really reachable */
+    put_be32(r + 24 + 4 * 0, 11);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    /* The bitmap INVERTS: bit 1 = FREE, bit 0 = allocated (bitmap.h). So a zeroed
+     * page means EVERY block is allocated, and bm_set() marks one FREE.
+     *
+     * This cost two turns: I wrote the volume with "mark 0..11 allocated", which
+     * under this convention marked 0..11 FREE and left 2..7 and 10 allocated
+     * and unreferenced -- i.e. the fixture manufactured nine orphans of its own
+     * making and failed the CONTROL, which reads like the checker being wrong.
+     * Third time in two sessions. Invert deliberately:
+     *
+     *   allocated (bit 0, left alone): 0, 1 bootblocks; 8 rootblock;
+     *                                 9 bitmap page; 11 the file
+     *   free     (bm_set):              2..7, 10, 13..15, and 12 unless leaking
+     *
+     * Block 12 is the planted orphan: left allocated and in no hash slot. */
+    uint8_t *bm = img + 9 * BS;
+    memset(bm, 0, BS);                    /* every block allocated */
+    for (uint32_t b = 2; b < 8u; b++) page_set(bm, b);
+    page_set(bm, 10);
+    for (uint32_t b = 13; b < 16u; b++) page_set(bm, b);
+    if (!leak) page_set(bm, 12);          /* free, so not an orphan */
+    put_be32(bm, afs_block_checksum(bm, BS, 0));
+}
+
+static void test_verify_flags_an_orphan_only_when_asked(void) {
+    uint8_t img[16 * BS];
+    afs_verify_report_t rep[64];
+
+    /* the control first: a volume with no orphan must be clean under the flag,
+     * or the flag is reporting something else */
+    build_vol_with_orphan(img, sizeof img, 0);
+    int clean = afs_verify_memory_ex(img, sizeof img, BS, rep, 64,
+                                     AFS_VERIFY_ORPHANS);
+    int saw_orphan_control = 0;
+    for (int i = 0; i < clean && i < 64; i++)
+        if (rep[i].kind == AFS_PROBLEM_ORPHAN) saw_orphan_control = 1;
+    CHECK_EQ_U(saw_orphan_control, 0,
+               "a volume with no orphan is clean under AFS_VERIFY_ORPHANS");
+
+    build_vol_with_orphan(img, sizeof img, 1);
+    int n = afs_verify_memory_ex(img, sizeof img, BS, rep, 64,
+                                 AFS_VERIFY_ORPHANS);
+    int found = 0, named_block = 0;
+    for (int i = 0; i < n && i < 64; i++)
+        if (rep[i].kind == AFS_PROBLEM_ORPHAN) {
+            found++;
+            if (rep[i].block == 12) named_block = 1;
+        }
+    CHECK(found > 0, "an allocated, unreferenced block IS reported (%d problems)", n);
+    CHECK(named_block, "  ...and it names the block (12)");
+
+    /* and WITHOUT the flag it is invisible -- that asymmetry is the whole
+     * point of the flag, and the reason M32's leak survived */
+    int n2 = afs_verify_memory_ex(img, sizeof img, BS, rep, 64, 0);
+    int hidden = 0;
+    for (int i = 0; i < n2 && i < 64; i++)
+        if (rep[i].kind == AFS_PROBLEM_ORPHAN) hidden = 1;
+    CHECK_EQ_U(hidden, 0,
+               "without the flag the orphan is NOT reported -- as it must not be");
+}
+
 int main(void) {
     printf("bitmap / verify\n");
+    test_verify_flags_an_orphan_only_when_asked();
     test_verify_strict_sees_a_freed_dircache_block();
     test_bitmap_block_checksum_rule();
     test_bitmap_read_across_blocks();

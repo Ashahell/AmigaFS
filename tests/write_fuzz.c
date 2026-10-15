@@ -300,7 +300,20 @@ static int check_volume(const char *when) {
      *
      * Strict is safe here and always was: this harness BUILDS its volume with a
      * correct map, so it has no stale-map noise to be drowned by, which is the
-     * only reason --strict is off by default elsewhere. */
+     * only reason --strict is off by default elsewhere.
+     *
+     * AFS_VERIFY_ORPHANS is deliberately NOT enabled here yet, and the reason is
+     * a finding rather than an oversight. Wired on, it fires on `op overflow` --
+     * the op that drives the volume to ENOSPC -- after 34 to 55 iterations, on
+     * every seed: afs_file_write_range's `fail_range` path deliberately does not
+     * free the blocks it had already allocated ("no transactions: blocks
+     * allocated before an I/O failure stay allocated but unreferenced", file.c).
+     * That is a DOCUMENTED accepted limitation, so asserting zero orphans here
+     * would red the gate forever.
+     *
+     * The honest form is a gate that pins the limitation and its size, not a
+     * fuzzer assertion quietly switched off -- see m33_orphan_and_enospc.sh.
+     * The capability and the completed data-block walk both ship regardless. */
     int n = afs_verify_memory_ex(g_img, sizeof g_img, 512, rep, 8,
                                  g_corrupt ? 0u : AFS_VERIFY_STRICT);
     if (n > 0) {

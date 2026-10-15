@@ -935,6 +935,103 @@ finds the thing — verified by planting an instance in `test_dir.c` and watchin
 versions pass straight over it.
 
 
+## M33 — making a leak visible, and what that immediately found (2026-10-15)
+
+M32 ended with a defect nothing could see: a leaked block is invisible because
+`afs_verify` never consulted the bitmap and `--strict` checks only the *other*
+direction. This milestone builds the missing capability — and it works
+immediately, which is how it earns its keep.
+
+**`AFS_VERIFY_ORPHANS` / `afs verify --orphans`.** Reports blocks the bitmap
+marks *allocated* that nothing in the tree references. Opt-in for the same
+reason strict is, and the reason is measured rather than argued:
+
+```
+g1a30c 998   arccsh 550   testofs 303   testffs 238   testhd 223
+ffdisk0049 210   test_link_chains 29   win32-names 20   links 10   blank 5
+```
+
+Every non-hostile fixture has some — g1a30c has nearly a thousand — because
+AmigaDOS returns a deleted file's blocks only when an optimiser runs. An
+everyday check reporting these would be unusable on every real image. They are
+bugs only on a volume *this project wrote*, which is the case the flag exists
+for.
+
+**The tree walk was incomplete, and the new check is what showed it.**
+`visit_entry` descended into directories only, so **no file's data blocks were
+ever marked**. Under the old one-directional check that was invisible; under the
+reverse question every allocated data block came back "unreferenced", and the
+write fuzzer reported blocks 3 and 4 on iteration 0 of a run whose only
+operation was a two-block file create. Completing the walk dropped `testffs.adf`
+from 316 apparent orphans to 238 — **238 is the truth, not the new count.**
+
+The offset was the fourth trap of this kind (after the bitmap coordinate space,
+the dircache chain link at +16, the soft-link target at +24): **the file data
+table is filled from the END backwards.** The walk read slot 0, found it empty,
+and the pointer for a one-block file lives at `24 + 4*(entries-1)` = 308.
+`collect_blocks` says it in one word: `REVERSED`. *When re-deriving an offset
+from a format, copy the reader's arithmetic.*
+
+**Also fixed: `afs verify` capped its report at 256 entries**, so on any volume
+with more than 256 problems the *reported count stopped counting*. That is not
+theoretical — it hid a mutant from this milestone's own gate, which compared
+"orphans before a write" with "orphans after" and got 256 both times while the
+true counts were 316 and 317. A truncated count is exactly the "an empty run
+reports green" failure the project exists to prevent, and it was in the tool
+users reach for to check a disk. Now sized to the volume.
+
+**Gate** `m33_orphan_and_enospc.sh` (29 → 30). Its load-bearing assertion is a
+**round trip**: writing a 1-block file, a 6-block file, and a link must each
+leave the orphan count **exactly** where it was. Three mutants proven
+load-bearing:
+
+| mutant | result |
+|---|---|
+| the orphan pass never runs | `FAIL --orphans reported nothing` |
+| data table read forwards, not reversed | `FAIL writing a small file changed the orphan count` |
+| the data-block walk removed entirely | `FAIL writing a small file changed the orphan count` |
+
+The third was invisible until the 256-entry cap was fixed — a gate that passed a
+mutant because the tool it called was lying to it.
+
+**Two CONFIRMED defects found and NOT fixed here — the next milestone's job.**
+Recorded here and in the gate header so they cannot be lost:
+
+1. **ENOSPC leak.** `afs_file_write_range`'s `fail_range` deliberately does not
+   free blocks it already allocated ("no transactions: blocks allocated before
+   an I/O failure stay allocated but unreferenced", `file.c`). With
+   `--orphans` wired into the write fuzzer this fires on `op overflow` after
+   34–55 iterations on every seed. The fuzzer therefore does **not** use the
+   flag, and the gate pins the limitation instead — pinning a known limit is the
+   project's convention; quietly switching a check off is not.
+2. **Second-large-write corruption — silent data loss, and the serious one.**
+   Found by forcing the volume nearly full:
+
+   | | result |
+   |---|---|
+   | 1 × 300 KB write | `OK, no structural problems found` |
+   | 2 × 300 KB writes | **20 problems** |
+   | 1 × 50 KB write | `OK` |
+
+   Blocks 1222 (`hlink_blue`) and 883 (`dir_2`) come back with invalid checksums
+   and unknown types, and **both entries have vanished from the listing** — the
+   allocator handed out blocks that were already in use. Not the size: the first
+   large write is clean.
+
+**Rules M33**
+
+- **M33.1 — A check that asks the reverse question exposes the walk it depends
+  on.** The orphan pass was wrong for a day because the *set it inverts* was
+  incomplete. A new check is also a new test of everything underneath it.
+- **M33.2 — A count that stops counting is worse than no count.** A fixed report
+  cap made `verify` report 256 for any volume with more problems, and that made
+  a gate pass a mutant. **Assert on quantities your tool computes without
+  truncation.**
+- **M33.3 — Re-measure every number a capability invalidates.** Completing the
+  walk changed `testofs` from 364 to 303 and `testhd` from 295 to 223. The old
+  figures were in a header as justification; they were about a *different*
+  walk.
+
 ## M32 — unlinking a link leaked its block, and no gate could see it (2026-10-15)
 
 Found by **measuring a code comment**, the same move as M31's dir-cache record.
@@ -1133,6 +1230,14 @@ extract nothing — a state our own reader accepts.
 - **Rule (M26):** re-measure an inherited claim before building on it. The plan's "extension chains are not implemented, needed above ~50 MB" was wrong in both halves — 600 KB files round-trip correctly. The 312 KB wall it appeared behind was a *bitmap* bug, and the error message pointed at neither.
 - **Rule (M28):** a bitmap bit has TWO coordinate spaces. `afs_bitmap_set/test` address an ASSEMBLED map at offset 0; a raw bitmap PAGE carries its own checksum long in bytes 0..3, so map data starts at `+4` (`afs_bitmap_read` assembles from `blk + 4`). Mixing them writes bits into the checksum word and produces a map no reader agrees with -- seen three times now: `verify.c`'s page reader, `test_verify.c`'s `bm_set()`, and the write fuzzer's fixture. When touching bitmap code, name the space in the comment.
 - **Rule (M30):** ask the ORACLE about your own fixtures, not only about downloaded images. Until M30 it had never been pointed at one, and a small hand-built volume is exactly where the subtle offsets live.
+- **Rule (M33):** a new check is also a test of everything underneath it. The
+  orphan pass was wrong because the set of "referenced" blocks it inverts was
+  incomplete -- `visit_entry` never marked file DATA blocks, which the old
+  one-directional check could not reveal. And **a count that stops counting is
+  worse than no count**: `afs verify` capped its report at 256, which made a
+  gate pass a mutant. **Assert on quantities your tool computes without
+  truncation**, and **re-measure every number a change invalidates** -- completing
+  the walk moved `testofs` from 364 to 303.
 - **Rule (M32):** measure the comment, and reach for a round trip. Unlinking a
   link leaked its block while both call sites said in plain words that it freed
   it. No gate saw it: `afs verify` never consults the bitmap, `--strict` checks

@@ -141,6 +141,62 @@ static void visit_entry(afs_volume_t *v, uint32_t block, visit_ctx_t *vc,
     if (k == AFS_BLOCK_ROOT || k == AFS_BLOCK_DIR) {
         visit_dir_raw(v, block, vc, depth + 1, rep, n, max);
     }
+    /* A FILE's DATA blocks, and its EXTENSION chain (M33).
+     *
+     * The walk used to descend into directories only, so no file's data blocks
+     * were ever marked. That was invisible while the bitmap check ran in the
+     * "referenced but marked free" direction -- unmarked blocks simply never
+     * matched -- and it became a false positive the moment the ORPHAN check
+     * asked the reverse question: every allocated data block came back "nothing
+     * references it". The write fuzzer reported blocks 3 and 4 on iteration 0
+     * of a run whose only operation was a two-block file create.
+     *
+     * THE DATA TABLE IS FILLED FROM THE END BACKWARDS. This cost two more
+     * turns than it should have: the walk read slot 0 and found it empty, and
+     * the pointer for a one-block file lives at `24 + 4*(entries-1)` = 308 on a
+     * 512-byte block, with the first block mirrored into `first_data` at +16.
+     * collect_blocks (file.c) says it in one word: REVERSED. When re-deriving
+     * an offset from a format, copy the READER'S arithmetic rather than
+     * reasoning about where a table ought to start. That is the fourth offset
+     * trap in this codebase, after the bitmap coordinate space (M24/M28/M29),
+     * the dircache chain link at +16 (M21) and the soft-link target at +24 (M31).
+     *
+     * Byte size gives the COUNT; high_seq gives how many pointers THIS block
+     * holds; the extension chain at BS-8 holds the rest. */
+    if (k == AFS_BLOCK_FILE) {
+        size_t payload = afs_volume_is_ofs(v) ? (bs - 24) : bs;
+        uint32_t bytesize = be32(b + bs - 188);
+        uint32_t nd = (bytesize == 0) ? 0u
+            : (uint32_t)((bytesize + (uint32_t)payload - 1u) / (uint32_t)payload);
+        const size_t entries = afs_hash_table_size(bs);
+        uint32_t cur = block;
+        uint32_t got = 0;
+        int guard = 0;
+        uint8_t *tb = b;
+        while (got < nd && cur != 0 && cur < vc->nblocks && guard++ < 64) {
+            uint32_t hs = be32(tb + 8);
+            if (hs > entries) hs = (uint32_t)entries;
+            uint32_t take = hs;
+            if (take > nd - got) take = nd - got;
+            for (uint32_t k2 = 0; k2 < take; k2++) {
+                size_t idx = entries - 1 - k2;          /* REVERSED */
+                uint32_t db = be32(tb + 24 + 4 * idx);
+                if (db != 0 && db < vc->nblocks && !vc->marks[db])
+                    vc->marks[db] = 1;
+            }
+            got += take;
+            uint32_t next = be32(tb + bs - 8);          /* extension chain */
+            if (cur == block) { free(b); return; }      /* keep the buffer */
+            if (got >= nd || next == 0) break;
+            cur = next;
+            uint8_t *nb2 = malloc(bs);
+            if (!nb2) break;
+            if (afs_volume_read_block(v, cur, nb2, bs) != 0) { free(nb2); break; }
+            if (tb != b) free(tb);
+            tb = nb2;
+        }
+        if (tb != b) free(tb);
+    }
     free(b);
 }
 
@@ -391,6 +447,43 @@ int afs_verify_memory_ex(const uint8_t *img, size_t size, size_t bsize,
             free(map);
         }
 skip_agreement:
+            ;
+
+            /* ORPHANS: allocated by the bitmap, referenced by NOTHING.
+             *
+             * This is the direction strict deliberately does not check, and it
+             * is the one that would have caught M32's leak (unlinking a link
+             * freed no block, and the volume verified clean in both modes).
+             *
+             * Blocks 0 and 1 are the bootblocks. They are marked allocated and
+             * appear in no chain on every volume, so they are excluded by
+             * position rather than by a special case -- there is no way to walk
+             * to them, which is the definition of "not reachable".
+             *
+             * Nothing else is excluded on principle. The exclusion set was
+             * chosen by MEASURING this pass over every fixture, not by
+             * reasoning about what ought to be reachable; the earlier draft
+             * assumed a bootblock mirror was always at block 2 and that was
+             * false on several of them. */
+            if (!(flags & AFS_VERIFY_ORPHANS)) goto skip_orphans;
+            {
+                size_t mapbytes = ((size_t)nblocks + 7u) / 8u;
+                uint8_t *map;
+                map = malloc(mapbytes ? mapbytes : 1);
+                if (map && afs_bitmap_read(v, map, mapbytes) > 0) {
+                    for (uint32_t b = 2; b < (uint32_t)nblocks && n < max; b++) {
+                        /* afs_bitmap_test is 1 for FREE: an orphan is the
+                         * opposite -- allocated, so test == 0 -- and not in
+                         * vc.marks. */
+                        if (!vc.marks[b] && !afs_bitmap_test(map, b))
+                            add_problem(out, &n, max, AFS_PROBLEM_ORPHAN, b,
+                                        "block %u is allocated but nothing "
+                                        "references it (leaked)", b);
+                    }
+                }
+                free(map);
+            }
+skip_orphans:
             ;
     }
 
