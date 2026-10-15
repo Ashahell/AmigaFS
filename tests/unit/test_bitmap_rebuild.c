@@ -312,9 +312,27 @@ static void add_root_dircache(uint8_t *img) {
     put_be32(r + 20, afs_block_checksum(r, BS, 20));
 }
 
+/* A volume that ACTUALLY has a dir-cache.
+ *
+ * M35: these two tests used to call build_vol(), which makes a DOS\1 volume --
+ * and DOS\1 has no DIRC bit, so a volume of that shape cannot have a dir-cache
+ * at all. They passed only because rb_mark_dircache never asked whether the
+ * volume had one: it walked the "chain" unconditionally and marked the blocks
+ * the fixture had planted. Give the reader the question and they failed, which
+ * is the test having been green for a reason that was not the reason (M28).
+ *
+ * The fixture was wrong, not the assertion: what these tests are about is
+ * PRESERVING a dir-cache chain, so the volume must be one that has one. */
+static void build_dirc_vol(uint8_t *img) {
+    build_vol(img);
+    put_be32(img, ((uint32_t)'D' << 24) | ((uint32_t)'O' << 16) |
+                  ((uint32_t)'S' << 8) | 0x05);                 /* DOS\5 DIRC */
+    put_be32(img + 8 * BS + 20, afs_block_checksum(img + 8 * BS, BS, 20));
+}
+
 static void test_rebuild_keeps_the_rootblocks_dircache(void) {
     uint8_t img[NBLK * BS];
-    build_vol(img);
+    build_dirc_vol(img);
     add_root_dircache(img);
 
     afs_volume_t *v = NULL;
@@ -344,7 +362,7 @@ static void test_rebuild_keeps_the_rootblocks_dircache(void) {
  * so the fix for the rootblock cannot regress it. */
 static void test_rebuild_keeps_a_subdirs_dircache(void) {
     uint8_t img[NBLK * BS];
-    build_vol(img);
+    build_dirc_vol(img);
 
     /* a subdirectory entry at block 11 in the root's hash table, whose own
      * cache chain is block 12 */
@@ -393,7 +411,75 @@ static void test_rebuild_keeps_a_subdirs_dircache(void) {
     afs_volume_close(v);
 }
 
+/* --- M35: the rebuild must not read a dir-cache chain that does not exist ----
+ *
+ * rb_mark_dircache reads the directory block's bs-8 as the first cache block
+ * and follows +16 from there. On a volume WITHOUT a dir-cache that field is the
+ * EXTENSION pointer and means something else entirely, and it is routinely
+ * non-zero: measured on the fixtures, bs-8 is 881 on blank.adf (DOS\0 OFS),
+ * testofs.adf (DOS\2 OFS/INTL) and testffs.adf alike. So on every OFS volume
+ * the walk leaves the cache context, reads an ordinary block's +16 as a chain
+ * link, and dies with "directory block 880 has a corrupt dircache chain" --
+ * refusing to rebuild a volume that is perfectly healthy.
+ *
+ * That matters far beyond tidiness: `bitmap-rebuild` is the REMEDY the M34
+ * guard names when it refuses to write, so a rebuild that cannot run on OFS
+ * leaves the refusal with nowhere to point. Four of the project's eleven
+ * fixtures are OFS.
+ *
+ * Every other reader already asks. dir.c gates in three places, verify.c gates
+ * once; bitmap.c was the only one that did not.
+ */
+static void test_rebuild_ignores_bs8_when_the_volume_has_no_dircache(void) {
+    uint8_t img[NBLK * BS];
+    build_vol(img);
+    /* DOS\0 OFS -- no DIRC bit, so no dir-cache and bs-8 is the extension */
+    put_be32(img, ((uint32_t)'D' << 24) | ((uint32_t)'O' << 16) |
+                  ((uint32_t)'S' << 8) | 0x00);
+    /* point bs-8 at an ordinary file block, exactly as a real OFS volume does */
+    put_be32(img + 8 * BS + BS - 8, 10);
+    /* and block 10 is an ORDINARY file, not a cache block: its +16 is payload,
+     * so reading it as nextDirC walks off the end of the volume. This is what
+     * a real OFS volume looks like -- my first attempt left block 10 zeroed, so
+     * nextDirC read as 0, the chain ended cleanly, and the test PASSED against
+     * the bug. A reproduction has to reproduce. */
+    put_be32(img + 10 * BS + 0, AFS_T_HEADER);
+    put_be32(img + 10 * BS + 16, 9999);      /* garbage "nextDirC" */
+    put_be32(img + 10 * BS + 20, afs_block_checksum(img + 10 * BS, BS, 20));
+    /* re-stamp: changing the DOS type invalidates the rootblock checksum, and
+     * my first version of this test failed with "rootblock checksum invalid" --
+     * RED for the wrong reason, which is the check working */
+    put_be32(img + 8 * BS + 20, afs_block_checksum(img + 8 * BS, BS, 20));
+
+    afs_volume_t *v = NULL;
+    char err[256] = {0};
+    CHECK(afs_volume_open_memory(img, sizeof img, BS, &v, err, sizeof err) == 0,
+          "an OFS volume opens (%s)", err);
+    if (!v) return;
+    CHECK(!afs_volume_has_dircache(v), "and is correctly reported as no-dircache");
+
+    afs_bitmap_rebuild_stats_t st;
+    int rc = afs_bitmap_rebuild(v, &st, err, sizeof err);
+    CHECK(rc == 0,
+          "rebuild succeeds on a volume with NO dir-cache (%s)", err);
+    CHECK(st.total == NBLK, "  ...and reports a full pass (%u blocks)", st.total);
+
+    /* and the blocks the tree does reach are still marked used, not freed */
+    uint32_t n = afs_volume_block_count(v);
+    size_t mapbytes = ((size_t)n + 31u) / 32u * 4u;
+    uint8_t *map = calloc(1, mapbytes);
+    if (afs_bitmap_read(v, map, mapbytes) >= 0) {
+        CHECK(!bm_get(map, 8), "the rootblock is marked used");
+        CHECK(!bm_get(map, 9), "the bitmap page is marked used");
+    } else {
+        CHECK(0, "map readable after the rebuild");
+    }
+    free(map);
+    afs_volume_close(v);
+}
+
 int main(void) {
+    test_rebuild_ignores_bs8_when_the_volume_has_no_dircache();
     test_rebuild_keeps_the_rootblocks_dircache();
     test_rebuild_keeps_a_subdirs_dircache();
     test_rebuild_never_frees_the_structural_blocks();

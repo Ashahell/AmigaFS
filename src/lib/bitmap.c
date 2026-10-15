@@ -208,9 +208,24 @@ static int rb_mark_file(rb_ctx_t *c, uint32_t hdrblk) {
  *
  * Our WRITER was always right — dir.c stamps headerKey at +4 and leaves
  * nextDirC at +16 zeroed for a single-block chain. Only this reader was wrong.
+ *
+ * GATED ON THE VOLUME HAVING A DIR-CACHE AT ALL (M35). This reader was the only
+ * one that did not ask, and on an OFS volume the field it reads is not a cache
+ * pointer at all — it is the extension pointer, and it is routinely non-zero:
+ * measured, bs-8 is 881 on blank.adf (DOS\0), testofs.adf (DOS\2) and
+ * testffs.adf alike. So the walk left the cache context, read an ordinary file's
+ * +16 as a chain link, and refused to rebuild a healthy volume with "directory
+ * block 880 has a corrupt dircache chain".
+ *
+ * That is not cosmetic. `bitmap-rebuild` is the REMEDY that M34's write guard
+ * names when it refuses to allocate from a map that disagrees with the tree, so
+ * a rebuild that cannot run on OFS leaves that refusal pointing at nothing. Four
+ * of this project's eleven fixtures are OFS. dir.c already gates in three places
+ * and verify.c in one; this is the same condition in the fourth reader.
  */
 static int rb_mark_dircache(rb_ctx_t *c, uint32_t dirblk) {
     size_t bs = c->bsize;
+    if (!afs_volume_has_dircache(c->v)) return 0;   /* no cache: bs-8 is not a chain */
     uint8_t *b = malloc(bs);
     if (!b) { rb_err(c->errbuf, c->errlen, "out of memory"); return -1; }
     if (afs_volume_read_block(c->v, dirblk, b, bs) != 0) {

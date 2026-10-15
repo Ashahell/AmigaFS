@@ -503,6 +503,43 @@ static int open_parent_rw(const char *image, const char *path,
  * it is offered as an explicit operator action and never run automatically on
  * open -- the allocator's refusal of a suspect map stays exactly as it was.
  * `--dry-run` reports what would be reclaimed and writes nothing. */
+/* Resolve the volume to operate on: a named partition of an RDB image, or the
+ * whole image. M34 -- `part` used to be accepted and discarded with a bare
+ * `(void)part;`, which is worse than not accepting it: the dispatcher parsed a
+ * partition name, `bitmap-rebuild` then opened block 0 of the whole disk and
+ * reported "no DOS filesystem id", and the M34 write guard -- which refuses when
+ * a volume's map disagrees with its tree -- named a remedy that could not run on
+ * an RDB disk at all.
+ *
+ * A partition window is a WINDOW into the image (start_block, size_blocks), so
+ * the rebuild must scope to it exactly as `afs bitmap` and the path commands do.
+ * Refusing an unknown name is the discipline used throughout this CLI. */
+static int open_target_volume(const char *image, const char *part,
+                              afs_volume_t **out) {
+    if (part && *part) {
+        afs_rdb_t rdb;
+        if (probe_rdb(image, &rdb) > 0) {
+            const char *p = part;
+            char first[128];
+            size_t o = 0;
+            while (*p == '/') p++;
+            while (*p && *p != '/' && o < sizeof first - 1) first[o++] = *p++;
+            first[o] = '\0';
+            const afs_rdb_partition_t *pp = find_partition(&rdb, first);
+            if (!pp) {
+                fprintf(stderr, "afs: no partition named '%s'\n", first);
+                return 1;
+            }
+            return open_partition_rw(image, pp, out, 1);
+        }
+    }
+    /* rw, not the read-only open: this opens the image precisely so the rebuild
+     * can WRITE the new map. Using open_volume here made every plain floppy fail
+     * with "cannot write bitmap page 0" -- caught immediately because the floppy
+     * case is the one everybody runs. */
+    return open_volume_rw(image, out);
+}
+
 static int cmd_bitmap_rebuild(const char *image, const char *part,
                               int dry_run, int assume_yes) {
     afs_volume_t *v = NULL;
@@ -558,8 +595,7 @@ static int cmd_bitmap_rebuild(const char *image, const char *part,
         return 0;
     }
 
-    (void)part;
-    if (open_volume_rw(image, &v) != 0) return 1;
+        if (open_target_volume(image, part, &v) != 0) return 1;
     if (afs_bitmap_rebuild(v, &st, err, sizeof err) != 0) {
         fprintf(stderr, "afs: %s\n", err);
         return 1;
@@ -988,12 +1024,27 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "bitmap") == 0)      return cmd_bitmap(image, argc > 3 ? argv[3] : NULL);
     if (strcmp(cmd, "bitmap-rebuild") == 0) {
         int dry = 0, yes = 0, i;
+        const char *part = NULL;
         for (i = 3; i < argc; i++) {
             if (strcmp(argv[i], "--dry-run") == 0) dry = 1;
             else if (strcmp(argv[i], "--yes") == 0) yes = 1;
-            else { fprintf(stderr, "afs: unknown option '%s'\n", argv[i]); return 2; }
+            else if (argv[i][0] == '-') {
+                fprintf(stderr, "afs: unknown option '%s'\n", argv[i]);
+                return 2;
+            } else if (!part) {
+                /* A partition name, as `afs bitmap <image> <partition>` takes.
+                 * M34: the write guard refuses when a partition's map disagrees
+                 * with its tree, so the remedy has to be reachable for one --
+                 * cmd_bitmap_rebuild already took this argument and the
+                 * dispatcher simply passed NULL, which made the refusal name a
+                 * command that could not help an RDB disk. */
+                part = argv[i];
+            } else {
+                fprintf(stderr, "afs: bitmap-rebuild takes one partition\n");
+                return 2;
+            }
         }
-        return cmd_bitmap_rebuild(image, NULL, dry, yes);
+        return cmd_bitmap_rebuild(image, part, dry, yes);
     }
     if (strcmp(cmd, "ls") == 0) {
         const char *dir = NULL;
