@@ -11,10 +11,16 @@
  * it.
  *
  * WHAT IS ASSERTED, after EVERY operation that returned success:
- *   1. afs_verify_memory() reports ZERO problems. This is the strong one: it
- *      checks checksums, pointer ranges, block types, double-use, bitmap
- *      agreement and dir-cache/hash-table agreement. A leaked block, an eaten
- *      live block, a broken chain and a stale cache record all fail here.
+ *   1. afs_verify_memory_ex(..., AFS_VERIFY_STRICT) reports ZERO problems. This
+ *      is the strong one: checksums, pointer ranges, block types, double-use,
+ *      dir-cache/hash-table agreement, AND bitmap agreement. A leaked block, an
+ *      eaten live block, a broken chain and a stale cache record all fail here.
+ *
+ *      STRICT is not decoration. It was afs_verify_memory() -- flags == 0 --
+ *      while this comment claimed bitmap agreement, which is the ONE check
+ *      strict adds. Measured: with the everyday call, a volume whose live file
+ *      header was marked free reported ZERO problems. That is M26's exact
+ *      shape, invisible to the harness built to find it (M28).
  *   2. A recursive tree walk yields EXACTLY the model's set of (path, kind) --
  *      no orphans, no duplicates, no missing entries.
  *   3. Every model's file reads back byte-identical.
@@ -226,10 +232,20 @@ static void build_volume(void) {
     put_be32(r + 508, AFS_ST_ROOT);
     put_be32(r + 20, afs_block_checksum(r, 512, 20));
     bm = g_img + (size_t)IMG_BM * 512;
-    /* calloc-equivalent: every bit 0 means "used"; free all but the reserved */
+    /* calloc-equivalent: every bit 0 means "used"; free all but the reserved.
+     *
+     * NOTE the +4. A bitmap PAGE keeps its own checksum long in bytes 0..3 and
+     * map data begins after it -- afs_bitmap_read assembles from `blk + 4`.
+     * afs_bitmap_set() writes at offset 0 because it addresses an ASSEMBLED
+     * map, so calling it on a raw page put every bit into the checksum word.
+     * This harness's volume therefore carried a broken map from the day it was
+     * written: the allocator state it exercised was not the map any reader
+     * would see. Enabling the strict check (M28) is what exposed it -- it
+     * reported blocks 880 and 881, the rootblock and the bitmap page, as
+     * live-but-free. */
     for (unsigned i = 0; i < IMG_BLOCKS; i++)
         if (i != 0 && i != 1 && i != IMG_ROOT && i != IMG_BM)
-            afs_bitmap_set(bm, i);
+            bm[4 + i / 8] |= (uint8_t)(0x80 >> (i % 8));
     put_be32(bm + 0, afs_block_checksum(bm, 512, 0));
     memset(g_ent, 0, sizeof g_ent);
     memset(g_tried, 0, sizeof g_tried);
@@ -265,14 +281,33 @@ static void damage_volume(unsigned blocks) {
 
 static afs_volume_t *g_vol;
 
+/* Corrupt mode STARTS from a deliberately damaged image. Its contract is that
+ * operations refuse cleanly and never half-apply -- NOT that the volume is
+ * clean, which it never was. So the bitmap-agreement check, which reports that
+ * PRE-EXISTING damage, is a clean-mode assertion. */
+static int g_corrupt = 0;
+
 static int check_volume(const char *when) {
     afs_verify_report_t rep[8];
-    int n = afs_verify_memory(g_img, sizeof g_img, 512, rep, 8);
+    /* STRICT, not the everyday check -- and the difference is the whole point.
+     *
+     * This harness's header claimed it catches "bitmap agreement", and it did
+     * not: afs_verify_memory() passes flags == 0, and bitmap agreement is the
+     * ONE thing AFS_VERIFY_STRICT adds. Measured: a volume whose live file
+     * header was marked free reported ZERO problems through the everyday call
+     * and ONE through this one -- M26's exact shape, invisible to the harness
+     * built to find it.
+     *
+     * Strict is safe here and always was: this harness BUILDS its volume with a
+     * correct map, so it has no stale-map noise to be drowned by, which is the
+     * only reason --strict is off by default elsewhere. */
+    int n = afs_verify_memory_ex(g_img, sizeof g_img, 512, rep, 8,
+                                 g_corrupt ? 0u : AFS_VERIFY_STRICT);
     if (n > 0) {
         for (int i = 0; i < n && i < 4; i++)
             printf("        [%d] block %u: %s\n", (int)rep[i].kind,
                    rep[i].block, rep[i].detail);
-        fail("verify after op", when);
+        fail("verify --strict after op", when);
         return -1;
     }
     return 0;
@@ -853,6 +888,7 @@ int main(int argc, char **argv) {
     rng_seed(seed);
     build_volume();
     if (corrupt) damage_volume(24);
+    g_corrupt = corrupt;
 
     printf("write fuzz: seed=%llu iters=%u corrupt=%d\n",
            (unsigned long long)seed, iterations, corrupt);

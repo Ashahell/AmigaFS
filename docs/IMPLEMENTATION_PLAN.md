@@ -824,6 +824,60 @@ Load-bearing proven: removing the marking turns the new unit test red. A no-op c
 that reports green forever is the failure mode this closes.
 
 
+## M28 — the write fuzzer claimed a check it did not run, and its volume's map was broken (2026-10-15)
+
+M27 asked whether anything could detect M26 and fixed the answer for `verify`. The next
+question is the same one aimed at the **harnesses**: does the write fuzzer -- the thing
+whose entire purpose is silent write corruption -- actually assert what it says?
+
+**Its header claimed:** *"afs_verify_memory() reports ZERO problems. This is the strong
+one: it checks checksums, pointer ranges, block types, double-use, **bitmap
+agreement** and dir-cache/hash-table agreement."*
+
+**It called `afs_verify_memory()`**, which is `afs_verify_memory_ex(..., 0)`. And bitmap
+agreement is the ONE and ONLY thing `AFS_VERIFY_STRICT` adds (`verify.c:380`). So the
+claim named the single check it was not running.
+
+Measured, not argued: a volume whose live file header was marked free reported **0
+problems** through the everyday call and **1** through strict --
+`block 2 is referenced by the tree but the bitmap marks it free`. That is M26's exact
+shape, invisible to the harness built to find it.
+
+**The second defect was worse, and enabling the check is what exposed it.** The harness
+built its volume's bitmap page by calling `afs_bitmap_set()` — which addresses an
+**assembled** map at offset 0 — on a **raw page**, whose map data starts at `+4`
+because bytes 0..3 are the page's own checksum long. Every bit it meant to set went into
+the checksum word. **The fuzzer's volume has carried a broken map since it was written**,
+so the allocator state it exercised was not the map any reader would see. With strict
+on, the harness reported blocks 880 and 881 -- the rootblock and the bitmap page -- as
+live-but-free, which is what pointed at the offset.
+
+Note the two bugs are of a kind now seen three times: **a bitmap bit addressed in the
+wrong coordinate space.** `verify.c`'s page reader, M27's test helper, and now the fuzz
+fixture. Worth its own note in the testing strategy below.
+
+**Honest scope.** Turning strict on did **not** reveal new library bugs: the operation
+tallies are byte-identical to the broken-map run (seed 1: create 22/55, overflow 0/17),
+because the allocator read the same wrong offset and was self-consistent. The harness was
+still measuring meaningless allocator state, but it was measuring it *consistently*. What
+was wrong was the claim, and the map.
+
+**Gate: `m28_strict_sees_bitmap_mismatch.sh` (25th).** Pins the **capability** rather
+than the fix's presence: builds the defect and requires strict to see it; compiles and
+runs the harness and requires its volume to survive its own strict check; asserts the
+call across line breaks.
+
+**This gate's first version was itself the bug it was written to catch.** It asserted with
+`grep "AFS_VERIFY_STRICT" tests/write_fuzz.c` — and the file's own **comment** names that
+token, so the grep matched whether or not the call existed. **Both mutants passed it.**
+It now matches the call across line breaks, and *that* check was added only after
+establishing that running the harness cannot see mutant A either: the harness's map is
+correct either way, so running it proves nothing about *which* check it calls.
+
+**Load-bearing proven per assertion:** mutant A (revert to the everyday call) and mutant
+B (page offset 0) each turn a specific named check red; good code passes both.
+
+
 ## 5. Testing strategy
 
 - **Oracle 1:** ADFlib CLI at pinned commit `73880de7` (`adfls`, `adfinfo`, `unadf`, `adfbitmap`). Reference for listings, metadata, content and bitmap. **Compare listings and content only** — its filesystem-type *string* is `???` for `DOS\2`/`DOS\4` because `adfVolIsFsValid()` is a label/overwrite guard (`src/adf_dev.c:529`, `examples/adfformat.c:134`), not a mount rule. Record that display gap in the oracle script.
@@ -833,6 +887,9 @@ that reports green forever is the failure mode this closes.
 - **Rule:** every read path must match the oracle on every fixture before it counts as done. Where an oracle is known to be weak (ADFlib RDB is experimental upstream), a disagreement is a **recorded finding**, not a pass.
 - **Rule (M24):** an oracle's *silence* is not agreement, and its stderr is not a damage signal. Before trusting an oracle to refute a change, measure what it does on the **pristine fixture** — `unadf` emits `No such file or directory` for links and some ordinary entries alike, resolves links to their targets, and exits 0 (see M24). An oracle that skips a construct silently looks like evidence of breakage; pin that limit in a gate (`m24_unadf_link_blindness.sh`) rather than rediscovering it.
 - **Rule (M26):** re-measure an inherited claim before building on it. The plan's "extension chains are not implemented, needed above ~50 MB" was wrong in both halves — 600 KB files round-trip correctly. The 312 KB wall it appeared behind was a *bitmap* bug, and the error message pointed at neither.
+- **Rule (M28):** a bitmap bit has TWO coordinate spaces. `afs_bitmap_set/test` address an ASSEMBLED map at offset 0; a raw bitmap PAGE carries its own checksum long in bytes 0..3, so map data starts at `+4` (`afs_bitmap_read` assembles from `blk + 4`). Mixing them writes bits into the checksum word and produces a map no reader agrees with -- seen three times now: `verify.c`'s page reader, `test_verify.c`'s `bm_set()`, and the write fuzzer's fixture. When touching bitmap code, name the space in the comment.
+- **Rule (M28):** a harness's comment is a claim, not evidence. The write fuzzer asserted "bitmap agreement" in prose for its whole life while calling the non-strict entry point, which skips the only check it named. Read the call, or run the harness -- do not trust the sentence.
+- **Rule (M28):** a grep cannot prove behaviour when the token also appears in prose. This gate's own first version grepped for `AFS_VERIFY_STRICT` and passed both mutants, because the file's comment names it. Match the CALL (across line breaks) or execute the code.
 - **Rule (M27):** ask whether anything can DETECT the bug you just fixed, by making the broken state and requiring the checker to reject it. A checker blind to the defect is worse than no checker — it reports green forever. Two sites of the same bug is evidence for a third, not a licence to invent one: M27's third-site "fix" was wrong and six existing tests said so immediately.
 - **Rule (M27):** when two components share an invariant, they can be wrong in the SAME direction and never contradict each other. The rebuild freed the root's cache block; the verifier could not see a freed cache block. Both looked healthy. "The rootblock is marked" is not "the rootblock's structures are marked" — the rootblock is the one directory no parent marks, so every rule that fires for children silently misses it. The "9 → 3" that started M24 compared a populated extraction tree against a differently-populated one.
 - **Fixtures:** pinned by sha256 in `fixtures.lock`, with measured DOS types. ADFlib's test data carries no separate licence: downloaded at test time, never committed or shipped. The `adfformat`-generated images are ours.
