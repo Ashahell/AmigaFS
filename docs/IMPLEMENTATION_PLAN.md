@@ -625,6 +625,56 @@ fixed.
 
 ---
 
+## M24 — the oracle's real limits found by a false regression report (2026-10-15)
+
+Hard-link writing was implemented, then reverted. Not because it was wrong — because
+the test that condemned it was measuring the oracle, not the code.
+
+**What happened.** After `afs link` created a hard link on `testffs.adf`, `unadf`
+extracted 3 of 9 files where it had extracted 9 of 9 before. That was reported as the
+oracle catching a regression. Four wrong turns followed, each with a plausible
+mechanism, before the truth:
+
+1. **Blamed the `next_link` chain append.** Exonerated — with the append, `unadf`
+   extracts 9/9 byte-identical. (The chain shape was independently confirmed against
+   `links.adf`: `FILE.next_link → LINKFILE → 0`, exactly what the code wrote.)
+2. **Blamed the stale bitmap** on `testffs.adf`. Exonerated — the blocks it handed
+   out were genuinely free per an authoritative rebuild.
+3. **Blamed `unadf` being nondeterministic.** Exonerated — five runs on the pristine
+   fixture all gave 9.
+4. **Concluded "unadf drops hard links."** Also wrong. On the pristine, untouched
+   `links.adf`, `unadf` extracts both real files **correctly**, resolving each link to
+   its target.
+
+**The truth.** `unadf` emits a per-entry `No such file or directory` for whatever it
+cannot materialise — links (it cannot give a link its own name) *and some ordinary
+files it walks oddly* — then continues, extracting every real file with correct bytes,
+and **exits 0 regardless**. So its stderr is not a damage signal and its exit code is
+not a link signal. The original "9 → 3" was a miscount: the link's target was being
+counted as extracted-after when it never was.
+
+**The transferable lesson, which is why this is a gate and not a note.** An oracle
+that silently skips a construct is worse than no oracle, because its output still looks
+like evidence. A gate asserting "unadf agrees" would have passed on the broken volume
+and failed on the correct one — the assertion was inverted by the oracle's blindness.
+
+**Gate: `m24_unadf_link_blindness.sh` (21st gate).** Pins the oracle's *actual*
+contract on link-bearing and link-free fixtures: every file `unadf` extracts is
+byte-identical to what our reader returns at the same path; no real file goes missing
+(count vs our own listing); our reader verifies each fixture clean. Load-bearing is
+**proven**, not asserted: a 1-byte flip in an extracted file is detected. An earlier
+load-bearing attempt that blanked the links' `nameLength` was discarded — a zero-length
+name stops the directory hash-chain walk dead, so it measured its own corruption rather
+than link removal.
+
+**Status.** Link *writing* remains unimplemented and is the last missing filesystem
+operation. It is not blocked for want of an oracle: `links.adf` supplies on-disk ground
+truth (block 891: `secType` −4, `real_entry` at 0x1d4, `byte_size` 0, no data, no
+extension) and `unadf` validates the *result*. What remains is to implement it and hold
+it to the byte-identity contract above — not to re-litigate the chain append, which is
+measured correct.
+
+
 ## 5. Testing strategy
 
 - **Oracle 1:** ADFlib CLI at pinned commit `73880de7` (`adfls`, `adfinfo`, `unadf`, `adfbitmap`). Reference for listings, metadata, content and bitmap. **Compare listings and content only** — its filesystem-type *string* is `???` for `DOS\2`/`DOS\4` because `adfVolIsFsValid()` is a label/overwrite guard (`src/adf_dev.c:529`, `examples/adfformat.c:134`), not a mount rule. Record that display gap in the oracle script.
@@ -632,6 +682,8 @@ fixed.
 - **Oracle 3:** unit golden vectors (checksums, hash and INTL fold, Latin-1, protection bits, dates, softlink paths).
 - **Cross-check, not an oracle:** AROS `afs`, for checksum, hash and `capitalch` only (C5).
 - **Rule:** every read path must match the oracle on every fixture before it counts as done. Where an oracle is known to be weak (ADFlib RDB is experimental upstream), a disagreement is a **recorded finding**, not a pass.
+- **Rule (M24):** an oracle's *silence* is not agreement, and its stderr is not a damage signal. Before trusting an oracle to refute a change, measure what it does on the **pristine fixture** — `unadf` emits `No such file or directory` for links and some ordinary entries alike, resolves links to their targets, and exits 0 (see M24). An oracle that skips a construct silently looks like evidence of breakage; pin that limit in a gate (`m24_unadf_link_blindness.sh`) rather than rediscovering it.
+- **Rule (M24):** a before/after count is only a measurement if the *before* is taken under identical conditions. The "9 → 3" that started M24 compared a populated extraction tree against a differently-populated one.
 - **Fixtures:** pinned by sha256 in `fixtures.lock`, with measured DOS types. ADFlib's test data carries no separate licence: downloaded at test time, never committed or shipped. The `adfformat`-generated images are ours.
 
 ---

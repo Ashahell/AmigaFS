@@ -159,6 +159,11 @@ example, and the two traps worth knowing about.
 - **Links are not written.** Both `afs rm` and the mount's `unlink`/`rename`
   refuse hard and soft links, and `afs mv` refuses to move them — the same set
   ADFlib's `adfRemoveEntry`/`adfRenameEntry` handle (FILE/DIR only).
+  **This is no longer attributed to the oracle being unable to help** (see
+  M24 in `docs/IMPLEMENTATION_PLAN.md`): hard-link *writing* was implemented
+  and held correct — the on-disk shape is pinned from `links.adf` block 891,
+  written by a real AmigaDOS, and `unadf` validates the result by reading it.
+  It is the last missing filesystem operation and is simply not yet landed.
 - **No rename across partitions**, by design: block addresses are
   partition-relative, so a cross-partition move is a copy+delete. The CLI
   refuses it by name, the mount returns `EXDEV`.
