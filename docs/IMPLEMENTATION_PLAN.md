@@ -781,6 +781,49 @@ new file (asserting it unchanged asserted the bug's symptom), and reusing one te
 file for four content comparisons compared three files against the fourth's bytes.
 
 
+## M27 — the checker for M26 could not see M26 (2026-10-15)
+
+M26 fixed the rebuild. Before calling it closed, I asked the question that gate
+design keeps asking: **can anything actually detect this?**
+
+**The check that should have caught it does not.** `verify --strict` exists for
+exactly this invariant — "every block the tree references must be marked USED in the
+allocation map" — and its implementation iterates the tree walk's `vc.marks[]`. But
+`verify_dircache` walked each directory's cache chain, checked its shape, and **never
+recorded the blocks it visited**. So dir-cache blocks were absent from `marks[]`, and
+the one check whose job is to catch M26 was blind to it. A volume with the root's
+cache block freed verified **clean in both modes**.
+
+That is a checker defect and a rebuild defect agreeing with each other: both were wrong
+in the same direction, so neither could contradict the other. The invariant was real,
+enforced nowhere.
+
+**Fix:** `verify_dircache` now marks each cache block into `vc.marks[]`. Two lines,
+with `marks` threaded through.
+
+**A third site of the same shape, found while fixing it.** I first added
+`vc.marks[root] = 1` before the walk, reasoning that the rootblock must be
+special-cased — the theory that had been right twice already. It was wrong:
+`visit_entry` marks the block it is *handed*, so the rootblock was already marked, and
+my line made the double-use check fire on the rootblock itself. Six existing tests went
+red immediately. **Two sites of a bug is evidence for a third, not a licence to invent
+one** — the walk already did the right thing, and the tests said so.
+
+**Also fixed: the test helper that hid this.** `bm_set()` in `test_verify.c` writes at
+byte 0 of a bitmap page — which is the page's own **checksum long**, not map data.
+Every test using it therefore never actually exercised bitmap agreement, and the
+"clean volume" in my new test passed for the wrong reason. The new test writes at `+4`,
+where the real reader looks, and says why in a comment.
+
+**Proof it works.** Deliberately freeing the root's cache block — M26's exact broken
+state — now makes `verify --strict` report *`block 1761 is referenced by the tree but
+the bitmap marks it free`*, while the good volume stays clean. `m26` asserts both, so a
+checker that cannot detect the defect it exists for fails its own gate.
+
+Load-bearing proven: removing the marking turns the new unit test red. A no-op check
+that reports green forever is the failure mode this closes.
+
+
 ## 5. Testing strategy
 
 - **Oracle 1:** ADFlib CLI at pinned commit `73880de7` (`adfls`, `adfinfo`, `unadf`, `adfbitmap`). Reference for listings, metadata, content and bitmap. **Compare listings and content only** — its filesystem-type *string* is `???` for `DOS\2`/`DOS\4` because `adfVolIsFsValid()` is a label/overwrite guard (`src/adf_dev.c:529`, `examples/adfformat.c:134`), not a mount rule. Record that display gap in the oracle script.
@@ -790,7 +833,8 @@ file for four content comparisons compared three files against the fourth's byte
 - **Rule:** every read path must match the oracle on every fixture before it counts as done. Where an oracle is known to be weak (ADFlib RDB is experimental upstream), a disagreement is a **recorded finding**, not a pass.
 - **Rule (M24):** an oracle's *silence* is not agreement, and its stderr is not a damage signal. Before trusting an oracle to refute a change, measure what it does on the **pristine fixture** — `unadf` emits `No such file or directory` for links and some ordinary entries alike, resolves links to their targets, and exits 0 (see M24). An oracle that skips a construct silently looks like evidence of breakage; pin that limit in a gate (`m24_unadf_link_blindness.sh`) rather than rediscovering it.
 - **Rule (M26):** re-measure an inherited claim before building on it. The plan's "extension chains are not implemented, needed above ~50 MB" was wrong in both halves — 600 KB files round-trip correctly. The 312 KB wall it appeared behind was a *bitmap* bug, and the error message pointed at neither.
-- **Rule (M26):** a rebuild is only as complete as its walk. "The rootblock is marked" is not "the rootblock's structures are marked" — the rootblock is the one directory no parent marks, so every rule that fires for children silently misses it. The "9 → 3" that started M24 compared a populated extraction tree against a differently-populated one.
+- **Rule (M27):** ask whether anything can DETECT the bug you just fixed, by making the broken state and requiring the checker to reject it. A checker blind to the defect is worse than no checker — it reports green forever. Two sites of the same bug is evidence for a third, not a licence to invent one: M27's third-site "fix" was wrong and six existing tests said so immediately.
+- **Rule (M27):** when two components share an invariant, they can be wrong in the SAME direction and never contradict each other. The rebuild freed the root's cache block; the verifier could not see a freed cache block. Both looked healthy. "The rootblock is marked" is not "the rootblock's structures are marked" — the rootblock is the one directory no parent marks, so every rule that fires for children silently misses it. The "9 → 3" that started M24 compared a populated extraction tree against a differently-populated one.
 - **Fixtures:** pinned by sha256 in `fixtures.lock`, with measured DOS types. ADFlib's test data carries no separate licence: downloaded at test time, never committed or shipped. The `adfformat`-generated images are ours.
 
 ---

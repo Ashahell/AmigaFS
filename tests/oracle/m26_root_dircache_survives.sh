@@ -189,6 +189,81 @@ for i in 1 2 3 4; do
 done
 [ "$mismatch" -eq 0 ] && note "every written file reads back byte-identical" "ok"
 
+# --- the checker must be able to SEE this class of damage ------------------
+# The invariant M26 violated is "every live structure block is marked used in
+# the map". `verify --strict` is the check for exactly that, and it could not
+# see it: verify_dircache walked each cache chain for shape and then forgot the
+# blocks, so the marks[] the strict check iterates never contained them. A
+# volume with the root's cache block freed verified CLEAN in BOTH modes --
+# while it was the one thing that made the next large write destroy data.
+#
+# Asserted by building the broken-rebuild volume deliberately and requiring
+# --strict to reject it. A check that cannot detect the defect it exists for is
+# worse than no check.
+check_strict_sees_it() {
+    local img="$1" label="$2"
+    local out
+    out=$("$BIN/afs" verify "$img" --strict 2>&1)
+    case "$out" in
+        *"OK, no structural problems"*)
+            note "$label: strict accepts the volume" "ok" ;;
+        *)
+            note "$label: strict REJECTS it" "$(printf '%s' "$out" | tail -1)" ;;
+    esac
+}
+
+# rebuild the volume with the M26 bug reintroduced, via a deliberately
+# incomplete map: mark the root's cache block free in the page.
+cp "$WORK/t.adf" "$WORK/broken.adf"
+bmprobe=$(mktemp -d)
+cat > "$WORK/freebm.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "amigafs/be.h"
+#include "amigafs/volume.h"
+#include "amigafs/checksum.h"
+/* Mark the rootblock's first dir-cache block FREE in the map, reproducing
+ * exactly what M26's incomplete rebuild produced. */
+int main(int argc, char **argv) {
+    afs_volume_t *v = NULL; char e[256] = {0};
+    if (afs_volume_open_window_rw(argv[1], 512, 0, 0, &v, e, sizeof e) != 0) return 1;
+    size_t bs = afs_volume_block_size(v);
+    uint8_t *r = malloc(bs);
+    afs_volume_read_block(v, afs_volume_rootblock(v), r, bs);
+    uint32_t cb = be32(r + bs - 8);
+    free(r);
+    if (!cb) { printf("NOCHAIN\n"); afs_volume_close(v); return 1; }
+    const afs_rootblock_t *rb = afs_volume_root(v);
+    uint32_t pg = rb->bm_pages[0];
+    uint8_t *b = malloc(bs);
+    afs_volume_read_block(v, pg, b, bs);
+    uint32_t bit = cb;
+    b[4 + bit / 8] |= (uint8_t)(0x80 >> (bit % 8));   /* set == free */
+    put_be32(b, afs_block_checksum(b, bs, 0));
+    afs_volume_write_block(v, pg, b, bs);
+    free(b);
+    printf("%u\n", cb);
+    afs_volume_close(v);
+    return 0;
+}
+EOF
+gcc -w -I"$ROOT/include" -o "$WORK/freebm" "$WORK/freebm.c" "$ROOT"/src/lib/*.c 2>/dev/null
+if [ -x "$WORK/freebm" ]; then
+    freed=$("$WORK/freebm" "$WORK/broken.adf" 2>/dev/null)
+    if [ -n "$freed" ] && [ "$freed" != "NOCHAIN" ]; then
+        note "reproduced the M26 map (cache block $freed marked free)" "yes"
+        check_strict_sees_it "$WORK/broken.adf" "broken volume"
+    else
+        note "could not reproduce the M26 map" "skipped"
+    fi
+else
+    note "could not build the map-breaking helper" "skipped"
+fi
+rm -rf "$bmprobe"
+
+check_strict_sees_it "$WORK/t.adf" "the good volume"
+
 mkdir -p "$WORK/out"
 unadf -d "$WORK/out" "$WORK/t.adf" >/dev/null 2>&1
 n_ex=$(find "$WORK/out" -type f ! -name '*.info' 2>/dev/null | wc -l)

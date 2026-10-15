@@ -637,8 +637,66 @@ static void test_verify_ignores_dircache_on_files_of_a_dirc_volume(void) {
                "a file header on a DIRC volume reports no dir-cache problems");
 }
 
+/* M26: a dir-cache block is part of the volume's LIVE STRUCTURE, so the strict
+ * bitmap agreement check must see it.
+ *
+ * This is the second site of the bug M26 found in the rebuild. verify_dircache
+ * walked the chain for structural soundness but never recorded the blocks it
+ * visited in the tree's marks[], so the strict check -- which iterates exactly
+ * that marks[] -- could not see them. Result: on a volume whose rebuild had
+ * freed the root's cache block, BOTH the plain and the --strict verify reported
+ * the volume clean. The invariant M26 violated was invisible to the checker
+ * whose whole job is to catch it.
+ *
+ * The two must agree: a block the rebuild keeps must be a block verify demands. */
+static void test_verify_strict_sees_a_freed_dircache_block(void) {
+    /* sanity: with the cache block marked USED (bit clear), strict is happy */
+    uint8_t clean[16 * BS];
+    build_dirc(clean, 0, DIRC_ROOT);
+    {
+        afs_verify_report_t rep[64];
+        int n = afs_verify_memory_ex(clean, sizeof clean, BS, rep, 64,
+                                     AFS_VERIFY_STRICT);
+        CHECK_EQ_U(count_kind(rep, n, AFS_PROBLEM_BITMAP_MISMATCH), 0,
+                   "strict is satisfied when the cache block is marked used");
+    }
+
+    /* Now free it -- the state M26's broken rebuild produced. build_dirc marks
+     * only blocks 12..15 free (a set bit == free, page space), so the cache
+     * block at 10 already comes out FREE and the "clean" case above only
+     * passed because verify had never marked it at all. Freeing it explicitly
+     * makes the intent obvious and keeps the test honest if build_dirc changes. */
+    uint8_t img[16 * BS];
+    build_dirc(img, 0, DIRC_ROOT);
+    {
+        /* A bitmap PAGE keeps its own checksum long in bytes 0..3, so map data
+         * starts at +4. bm_set() above writes at offset 0 -- into the checksum
+         * -- which is why these tests never actually exercised bitmap
+         * agreement, and why this one writes at the offset the real reader
+         * uses. A set bit means FREE. */
+        uint8_t *bm = img + DIRC_BM * BS;
+        uint32_t bit = DIRC_CACHE;
+        bm[4 + bit / 8] |= (uint8_t)(0x80 >> (bit % 8));
+        put_be32(bm, afs_block_checksum(bm, BS, 0));
+    }
+
+    afs_verify_report_t rep[64];
+    int n_bad = afs_verify_memory_ex(img, sizeof img, BS, rep, 64,
+                                     AFS_VERIFY_STRICT);
+    CHECK(count_kind(rep, n_bad, AFS_PROBLEM_BITMAP_MISMATCH) >= 1,
+          "strict reports the live cache block that the bitmap marks free");
+
+    /* and the everyday check stays quiet: a stale map is ORDINARY on a real
+     * Amiga disk, which is exactly why this belongs behind --strict */
+    afs_verify_report_t rep2[64];
+    int n_plain = afs_verify_memory(img, sizeof img, BS, rep2, 64);
+    CHECK_EQ_U(count_kind(rep2, n_plain, AFS_PROBLEM_BITMAP_MISMATCH), 0,
+               "the everyday check does not report it (stale maps are ordinary)");
+}
+
 int main(void) {
     printf("bitmap / verify\n");
+    test_verify_strict_sees_a_freed_dircache_block();
     test_bitmap_block_checksum_rule();
     test_bitmap_read_across_blocks();
     test_bitmap_ext_block();

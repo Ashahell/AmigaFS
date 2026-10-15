@@ -171,8 +171,8 @@ static void visit_entry(afs_volume_t *v, uint32_t block, visit_ctx_t *vc,
  * VOLUME non-DIRC, which masked the missing per-block gate; only the sweep
  * over the real fixtures exposed it. */
 static void verify_dircache(afs_volume_t *v, uint32_t dirblk,
-                            uint8_t *seen, afs_verify_report_t *rep,
-                            int *n, int max) {
+                            uint8_t *seen, uint8_t *marks,
+                            afs_verify_report_t *rep, int *n, int max) {
     size_t bs = afs_volume_block_size(v);
     uint32_t nblocks = afs_volume_block_count(v);
     uint8_t *b = malloc(bs);
@@ -198,6 +198,14 @@ static void verify_dircache(afs_volume_t *v, uint32_t dirblk,
             break;
         }
         seen[cb] = 1;
+        /* A dir-cache block is LIVE STRUCTURE: the allocator must never hand
+         * it out, so it belongs in the tree's marks -- which is exactly what
+         * the strict bitmap agreement check iterates. This walk used to check
+         * the chain's shape and then forget the blocks, so a volume whose
+         * rebuild had freed the ROOT's cache block verified clean in BOTH
+         * modes: the same bug M26 found in the rebuild, sitting in the checker
+         * whose whole job is to catch it. */
+        if (marks) marks[cb] = 1;
         if (afs_volume_read_block(v, cb, b, bs) != 0) {
             add_problem(rep, n, max, AFS_PROBLEM_CHAIN, cb,
                         "directory %u: cannot read dir-cache block %u",
@@ -239,7 +247,7 @@ static void verify_all_dircaches(afs_volume_t *v, uint8_t *marks,
     uint8_t *seen = calloc(nblocks, 1);
     if (!seen) return;
     for (uint32_t b = 0; b < nblocks && *n < max; b++) {
-        if (marks[b]) verify_dircache(v, b, seen, rep, n, max);
+        if (marks[b]) verify_dircache(v, b, seen, marks, rep, n, max);
     }
     free(seen);
 }
@@ -270,6 +278,11 @@ int afs_verify_memory_ex(const uint8_t *img, size_t size, size_t bsize,
     /* the rootblock is validated by open (it refuses a bad rootblock), so we
      * verify its entries here */
     uint32_t root = afs_volume_rootblock(v);
+    /* visit_entry marks the block it is HANDED, so the rootblock lands in
+     * vc.marks here like any other -- the walk's entry point is not special
+     * after all. (I had added a redundant vc.marks[root] = 1 on the theory
+     * that it was, which made the double-use check fire on the rootblock
+     * itself; the tests caught it, which is what they are for.) */
     visit_entry(v, root, &vc, 0, out, &n, max);
 
     /* Dir-cache chains. `vc.marks` holds every block the tree reached, so the
