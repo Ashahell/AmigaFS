@@ -23,6 +23,8 @@
 #include "amigafs/file.h"
 #include "amigafs/links.h"
 #include "amigafs/hash.h"
+#include "amigafs/bitmap.h"
+#include "amigafs/blocktypes.h"
 #include "amigafs/verify.h"
 #include "amigafs/volume.h"
 
@@ -841,8 +843,240 @@ static void test_create_softlink_into_reused_block(void) {
           "at least one link landed on a block that HAD stale bytes");
 }
 
+/* --- M32: unlinking a link must give its block back ----------------------
+ *
+ * Found by MEASURING a code comment, which is the same move as M31's dir-cache
+ * record: `afs rm`'s hard-link branch and the mount's `.unlink` both say
+ *
+ *     "A hard link is only a name. Removing it frees its own header block"
+ *
+ * and neither frees anything. Measured on testffs.adf:
+ *
+ *     after hard link:  free = 1412
+ *     after rm h1:      free = 1412     <- the comment says 1413
+ *
+ * One block per unlinked hard link, leaked permanently: the name is gone, the
+ * entry is unreachable, and the block is marked USED so no allocator will ever
+ * hand it out again. On a long-lived volume that is a slow disk-full.
+ *
+ * NO GATE COULD SEE IT, which is the more interesting half:
+ *   - `afs verify` passes: it does not consult the bitmap at all
+ *   - `afs verify --strict` passes this volume, and its 11 complaints on a
+ *     stale fixture are the OPPOSITE direction ("referenced but marked free")
+ *   - there is no orphan detection anywhere in verify.c -- a block marked used
+ *     and referenced by nothing is simply not a condition anything checks
+ *
+ * So the assertion here is a BITMAP ROUND-TRIP, not a structural check: the
+ * free-block count must return exactly to where it started. That is the only
+ * kind of assertion that can see a leak, and it is why the test states the
+ * count rather than "the volume verifies".
+ */
+/* Count ALLOCATED blocks.
+ *
+ * THE BITMAP IS INVERTED: afs_bitmap_test() returns 1 for a FREE block and 0 for
+ * an allocated one (bitmap.h: "1 = free, 0 = allocated"). My first version of
+ * this helper counted the set bits and called the result "used", so it actually
+ * counted FREE blocks -- which made a correct `afs_free_block` look like it was
+ * leaking, sent me auditing `page[byte] |= (1u << bit)` as a bug when it is the
+ * correct operation, and cost two detours. The assertion below is right; the
+ * helper was counting the wrong direction. This comment is here because the
+ * next person will make the same mistake.
+ */
+static int allocated_blocks(afs_volume_t *v) {
+    uint32_t nb = afs_volume_block_count(v);
+    size_t cap = (size_t)((nb + 7) / 8) + 64;
+    uint8_t *map = malloc(cap);
+    if (!map) return -1;
+    if (afs_bitmap_read(v, map, cap) < 0) { free(map); return -1; }
+    int n = 0;
+    for (uint32_t i = 0; i < nb; i++) if (!afs_bitmap_test(map, i)) n++;
+    free(map);
+    return n;
+}
+
+static void test_unlink_softlink(void) {
+    synth_t s;
+    synth_init(&s, 0x01);
+    afs_volume_t *v = synth_open(&s);
+    if (!v) { CHECK(0, "volume opens"); return; }
+    char err[256];
+
+    uint32_t fblk = 0, dirblk = 0, sl = 0;
+    CHECK_EQ_U(afs_file_create(v, ROOT, "target.txt", 10, &fblk,
+                               err, sizeof err), 0, "created the target (%s)", err);
+    CHECK_EQ_U(afs_dir_mkdir(v, ROOT, "sub", 3, &dirblk, err, sizeof err), 0,
+               "created a directory (%s)", err);
+    CHECK_EQ_U(afs_symlink(v, dirblk, "tofile", 6, "../target.txt", 12, &sl,
+                           err, sizeof err), 0, "created a soft link (%s)", err);
+    /* sizeof - 1, never a hand-counted literal. I hand-counted this string
+     * wrong twice in this session ("dir1/dir1_1/testfile1.txt" in M31, then
+     * "../gone.txt" here) and BOTH times the symptom was "the target comes back
+     * one byte short" -- which looks exactly like a reader bug and is not one.
+     * The tell is that the shortfall is always exactly one byte. */
+    static const char sib_target[] = "../gone.txt";
+    uint32_t sl2 = 0;
+    CHECK_EQ_U(afs_symlink(v, dirblk, "tofile2", 7, sib_target,
+                           sizeof sib_target - 1, &sl2, err, sizeof err), 0,
+               "created a soft link to something absent (%s)", err);
+
+    int before = allocated_blocks(v);
+    CHECK(before > 0, "the map reports %d allocated blocks", before);
+
+    /* The AmigaDOS Developer's Manual, on soft links: "If a soft link is
+     * deleted then its file header block is freed." That is the whole
+     * specification -- the link stores a string, so there is no reference to
+     * repair and no target to touch. */
+    CHECK_EQ_U(afs_link_remove(v, dirblk, "tofile", 6, err, sizeof err), 0,
+               "unlinked a soft link (%s)", err);
+    CHECK(sl != 0, "  ...the link had its own block to give back");
+
+    /* the name is gone from the directory */
+    afs_dirent_t e;
+    CHECK(afs_dir_lookup(v, dirblk, "tofile", 6, &e) != 0,
+          "the name is gone");
+
+    /* THE BLOCK CAME BACK. This is the assertion that would have caught the
+     * hard-link leak, and the one no structural check can make. */
+    CHECK_EQ_U(allocated_blocks(v), before - 1,
+               "the ALLOCATED-block count dropped by exactly one");
+
+    /* and the sibling link and the target are both untouched */
+    /* Resolve, but do NOT re-assert the reader's translation semantics here --
+     * that is covered by test_softlink_translation and is not what this test is
+     * about. What matters is that unlinking a sibling left it intact. */
+    char sib[512];
+    CHECK_EQ_U(afs_softlink_target(v, dirblk, "tofile2", 7, sib, sizeof sib), 0,
+               "the sibling link still resolves");
+    CHECK(strstr(sib, "gone.txt") != NULL,
+          "  ...and still points at the same target (got \"%s\")", sib);
+    CHECK_EQ_S(sib, "../../gone.txt",
+               "  ...translated for a link one directory deep");
+    {
+        char buf[16] = {0};
+        size_t got = 0;
+        CHECK_EQ_U(afs_file_read(v, ROOT, "target.txt", 10, buf, sizeof buf, 0, &got), 0,
+                   "the TARGET file is untouched -- a link is only a name");
+        CHECK_EQ_U(got, 0, "  ...and still empty, as created");
+    }
+
+    /* unlink the second one: the count must drop again, so the invariant is a
+     * round trip rather than a coincidence of the first call */
+    CHECK_EQ_U(afs_link_remove(v, dirblk, "tofile2", 7, err, sizeof err), 0,
+               "unlinked the second soft link (%s)", err);
+    CHECK_EQ_U(allocated_blocks(v), before - 2, "and the count dropped again");
+
+    afs_volume_close(v);
+}
+
+/* The hard-link leak, stated directly so the regression cannot come back
+ * quietly. Same primitive, same assertion. */
+static void test_unlink_hardlink_returns_its_block(void) {
+    synth_t s;
+    synth_init(&s, 0x01);
+    afs_volume_t *v = synth_open(&s);
+    if (!v) { CHECK(0, "volume opens"); return; }
+    char err[256];
+
+    uint32_t fblk = 0, link = 0;
+    CHECK_EQ_U(afs_file_create(v, ROOT, "orig", 4, &fblk, err, sizeof err), 0,
+               "created a file (%s)", err);
+    CHECK_EQ_U(afs_file_write_all(v, fblk, "hello", 5, err, sizeof err), 0,
+               "gave it contents (%s)", err);
+    CHECK_EQ_U(afs_file_link(v, ROOT, "hard", 4, fblk, &link, err, sizeof err), 0,
+               "created a hard link (%s)", err);
+
+    int before = allocated_blocks(v);
+    CHECK_EQ_U(afs_link_remove(v, ROOT, "hard", 4, err, sizeof err), 0,
+               "unlinked the hard link (%s)", err);
+    CHECK(link != 0, "  ...and it owned a header block to free");
+    CHECK_EQ_U(allocated_blocks(v), before - 1,
+               "the ALLOCATED-block count dropped by exactly one");
+
+    /* the target survives with its contents -- unlinking a link is not
+     * unlinking the file */
+    char buf[16] = {0};
+    size_t got = 0;
+    CHECK_EQ_U(afs_file_read(v, ROOT, "orig", 4, buf, sizeof buf, 0, &got), 0,
+               "the target still reads");
+    CHECK_EQ_U(got, 5, "  ...its full length");
+    CHECK_EQ_S(buf, "hello", "  ...with its contents intact");
+
+    afs_volume_close(v);
+}
+
+/* The dir-cache record must go with the name. On a DOS\5 volume the cache is
+ * what an outside implementation walks (M31), so a stale record would leave
+ * the entry VISIBLE to ADFlib after our own reader had dropped it -- the
+ * volume would look intact to us and wrong to the oracle. */
+static void test_unlink_removes_the_dircache_record(void) {
+    synth_t s;
+    /* DOS\5, NOT DOS\1: afs_dircache_upsert returns early on a volume with no
+     * dir-cache, so on DOS\1 the precondition below reads 0 and the test would
+     * "pass" for the wrong reason. The precondition assertion is what caught
+     * that -- a DOS\1 volume has no cache to put a record in, at all. */
+    synth_init(&s, 0x05);
+    afs_volume_t *v = synth_open(&s);
+    if (!v) { CHECK(0, "volume opens"); return; }
+    char err[256];
+
+    uint32_t fblk = 0, sl = 0;
+    CHECK_EQ_U(afs_file_create(v, ROOT, "keep.txt", 8, &fblk, err, sizeof err), 0,
+               "created a file to keep (%s)", err);
+    CHECK_EQ_U(afs_symlink(v, ROOT, "gonelink", 8, "keep.txt", 8, &sl,
+                           err, sizeof err), 0, "created a link to remove (%s)", err);
+    uint32_t sl2 = 0;
+    CHECK_EQ_U(afs_symlink(v, ROOT, "staylink", 9, "keep.txt", 8, &sl2,
+                           err, sizeof err), 0, "created a link to keep (%s)", err);
+
+    /* read the dir-cache back through the public reader */
+    int recs_before = 0;
+    {
+        afs_dircache_t dc;
+        memset(&dc, 0, sizeof dc);
+        uint8_t *b = calloc(1, BS);
+        if (b && afs_volume_read_block(v, ROOT, b, BS) == 0) {
+            uint32_t cur = be32(b + BS - 8);
+            if (cur && afs_volume_read_block(v, cur, b, BS) == 0 &&
+                afs_parse_dircache(b, BS, &dc) == 0) {
+                for (size_t i = 0; i < dc.rec_count; i++)
+                    if (!strcmp(dc.rec[i].name, "gonelink")) recs_before++;
+            }
+        }
+        free(b);
+    }
+    CHECK_EQ_U(recs_before, 1, "the new link IS in the dir cache (precondition)");
+
+    CHECK_EQ_U(afs_link_remove(v, ROOT, "gonelink", 8, err, sizeof err), 0,
+               "unlinked it (%s)", err);
+
+    int still = 0, keep = 0;
+    {
+        afs_dircache_t dc;
+        memset(&dc, 0, sizeof dc);
+        uint8_t *b = calloc(1, BS);
+        if (b && afs_volume_read_block(v, ROOT, b, BS) == 0) {
+            uint32_t cur = be32(b + BS - 8);
+            if (cur && afs_volume_read_block(v, cur, b, BS) == 0 &&
+                afs_parse_dircache(b, BS, &dc) == 0) {
+                for (size_t i = 0; i < dc.rec_count; i++) {
+                    if (!strcmp(dc.rec[i].name, "gonelink")) still++;
+                    if (!strcmp(dc.rec[i].name, "staylink")) keep++;
+                }
+            }
+        }
+        free(b);
+    }
+    CHECK_EQ_U(still, 0, "its dir-cache record is GONE -- not left for the oracle to find");
+    CHECK_EQ_U(keep, 1, "the other link's record is untouched");
+
+    afs_volume_close(v);
+}
+
 int main(void) {
     printf("links\n");
+    test_unlink_softlink();
+    test_unlink_hardlink_returns_its_block();
+    test_unlink_removes_the_dircache_record();
     test_create_softlink();
     test_create_softlink_into_reused_block();
     test_create_softlink_refusals();

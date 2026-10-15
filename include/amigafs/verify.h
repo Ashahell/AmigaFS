@@ -33,8 +33,19 @@ typedef enum {
     AFS_PROBLEM_RANGE,          /* a block pointer is outside the volume    */
     AFS_PROBLEM_TYPE,           /* a block has an unrecognised type         */
     AFS_PROBLEM_DOUBLE_USE,     /* the same physical block is used twice    */
-    AFS_PROBLEM_BITMAP_MISMATCH,/* a block is used but marked free, or free
-                                 * but marked used                          */
+    AFS_PROBLEM_BITMAP_MISMATCH,/* a block is REFERENCED by the tree but the
+                                 * bitmap marks it free.                    */
+                                 /* ONLY THIS DIRECTION IS CHECKED, and only
+                                 * under AFS_VERIFY_STRICT. The other one --
+                                 * marked used but referenced by nothing, i.e.
+                                 * a LEAK -- is not detected by verify at all,
+                                 * because a stale map is ordinary on a real
+                                 * Amiga disk and this is a damage checker. A
+                                 * writer that leaks must therefore assert on
+                                 * the bitmap itself: see afs_link_remove's
+                                 * header and tests/oracle/m32_link_unlink.sh.
+                                 * (The old comment here claimed both
+                                 * directions and was wrong; M32.) */
     AFS_PROBLEM_DIRCACHE,       /* the dir cache disagrees with the hash table*/
     AFS_PROBLEM_CHAIN,          /* a pointer chain does not terminate       */
     AFS_PROBLEM_ROOTBLOCK       /* the rootblock is malformed               */

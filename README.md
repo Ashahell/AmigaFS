@@ -167,10 +167,11 @@ example, and the two traps worth knowing about.
   all legal) and is deliberately **not resolved** — pointing at something that
   does not exist yet is the point of a symlink. `readlink` returns the
   *translated* path, which is what the kernel needs to resolve through the
-  mount. **`unlink` of a soft link is still refused** (removing one means
-  rewriting the target's name). `afs mv` refuses links, matching ADFlib's
-  `adfRemoveEntry`/`adfRenameEntry`, which handle FILE/DIR only.
-  Hard links are FFS-only, and refused on OFS by name.
+  mount. **Both kinds are removable** by `afs rm` and the mount's `unlink`/`rm`,
+  and removal frees only the link's own block — the target is untouched.
+  `afs mv` refuses links, matching ADFlib's `adfRemoveEntry`/`adfRenameEntry`,
+  which handle FILE/DIR only. Hard links are FFS-only, and refused on OFS by
+  name.
 - **No rename across partitions**, by design: block addresses are
   partition-relative, so a cross-partition move is a copy+delete. The CLI
   refuses it by name, the mount returns `EXDEV`.

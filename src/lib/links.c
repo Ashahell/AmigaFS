@@ -501,3 +501,42 @@ int afs_symlink(afs_volume_t *v, uint32_t dirblock,
     *link_out = nb;
     return 0;
 }
+
+int afs_link_remove(afs_volume_t *v, uint32_t dirblock,
+                    const char *name, size_t namelen,
+                    char *errbuf, size_t errlen) {
+    uint32_t gone = 0;
+    afs_dirent_t e;
+
+    if (!v || !name) { lk_err(errbuf, errlen, "bad arguments"); return -1; }
+    if (afs_dir_lookup(v, dirblock, name, namelen, &e) != 0) {
+        lk_err(errbuf, errlen, "'%.*s' not found", (int)namelen, name);
+        return -1;
+    }
+    /* Only a LINK entry. A file goes through afs_file_delete (which frees a
+     * data-block chain) and a directory through afs_dir_rmdir (which frees its
+     * dir-cache chain). This frees ONE block -- the link's own header -- and
+     * the generic sequence is right for both link kinds. */
+    if (e.kind != AFS_BLOCK_SOFTLINK && e.kind != AFS_BLOCK_LINKFILE) {
+        lk_err(errbuf, errlen,
+               "'%.*s' is not a link; use the file or directory remover",
+               (int)namelen, name);
+        return -1;
+    }
+
+    /* 1. the name. After this the entry is unreachable whatever follows. */
+    if (afs_dir_unlink(v, dirblock, name, namelen, &gone, errbuf, errlen) != 0)
+        return -1;
+    if (gone != e.block) {
+        lk_err(errbuf, errlen, "unlink raced lookup (internal)");
+        return -1;
+    }
+    /* 2. the dir-cache record. On a DOS\5 volume this is what an outside
+     *    implementation reads, so leaving it would keep the entry VISIBLE to
+     *    ADFlib after our own reader had dropped the name -- a volume that
+     *    looks intact here and wrong to the oracle (M31). */
+    if (afs_dircache_del(v, dirblock, gone, errbuf, errlen) != 0) return -1;
+    /* 3. the block itself. This is the step both shells used to omit. */
+    if (afs_free_block(v, gone, errbuf, errlen) != 0) return -1;
+    return 0;
+}

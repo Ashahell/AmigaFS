@@ -883,24 +883,30 @@ static void afs_ll_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
             fuse_reply_err(req, err_to_errno(err));
             return;
         }
-    } else if (e.kind == AFS_BLOCK_LINKFILE) {
-        /* A hard link is just a name. Removing it frees only its own header
-         * block; the target and its data are untouched, and afs_dir_unlink
-         * also unhooks the next_link chain so nlink stays right (M24).
-         * Previously every non-file/dir fell through to err_to_errno() with an
-         * EMPTY errbuf, so the errno came from a string that never said
-         * anything. */
-        uint32_t gone = 0;
-        if (afs_dir_unlink(vol, pblk, name, strlen(name), &gone,
-                           err, sizeof err) != 0) {
+    } else if (e.kind == AFS_BLOCK_LINKFILE || e.kind == AFS_BLOCK_SOFTLINK) {
+        /* A link is just a name. Removing it frees only its own header block;
+         * the target and its data are untouched.
+         *
+         * This branch used to cover hard links alone and call afs_dir_unlink,
+         * which splices the NAME out and nothing else -- under a comment saying
+         * the block was freed. It was not (measured: free-block count unchanged
+         * where the comment said +1), and it also left the dir-cache record
+         * behind, which on a DOS\5 volume keeps the entry visible to ADFlib
+         * after our own reader had dropped it (M31). afs_link_remove does the
+         * whole sequence so no caller can do half of it.
+         *
+         * A SOFT link is removed the same way. The AmigaDOS Developer's Manual:
+         * "If a soft link is deleted then its file header block is freed." The
+         * link stores a path STRING, so there is no reference to repair and no
+         * target to touch -- which is exactly what the old refusal claimed was
+         * impossible. */
+        if (afs_link_remove(vol, pblk, name, strlen(name),
+                            err, sizeof err) != 0) {
             fuse_reply_err(req, err_to_errno(err));
             return;
         }
     } else {
-        /* A soft link cannot be removed without touching its target's name, so
-         * it stays refused -- but now with a REASON rather than an empty one. */
-        snprintf(err, sizeof err, "soft link removal is not supported");
-        fuse_reply_err(req, EACCES);
+        fuse_reply_err(req, EINVAL);
         return;
     }
     fuse_reply_err(req, 0);

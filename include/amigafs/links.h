@@ -92,6 +92,40 @@ int afs_symlink(afs_volume_t *v, uint32_t dirblock,
                 const char *target, size_t targetlen,
                 uint32_t *link_out, char *errbuf, size_t errlen);
 
+/* Remove a LINK entry completely: splice the name out of the directory's hash
+ * chain, unhook it from any hard-link chain, drop its dir-cache record, and
+ * free its header block.
+ *
+ * This exists because two callers each hand-rolled HALF of it. Both the CLI's
+ * `rm` and the mount's `unlink` called afs_dir_unlink -- which splices the NAME
+ * out and nothing else -- and both carried a comment saying the block was
+ * freed. It was not. Measured: unlinking a hard link left the free-block count
+ * at 1412 where the comment said 1413, and the block stayed marked USED, so no
+ * allocator would hand it out again. No gate could see it: `afs verify` never
+ * consults the bitmap, `--strict` only checks the other direction ("referenced
+ * but marked free"), and nothing anywhere detects a block marked used and
+ * referenced by nothing.
+ *
+ * Why this is a separate function and not a flag on afs_dir_unlink: RENAME
+ * calls afs_dir_unlink and then rewrites that same block and re-links it into
+ * the destination. Freeing inside the chain primitive would free a live entry
+ * mid-rename. The chain operation and the release operation are genuinely
+ * different things, and only one of them is ever wanted at a time.
+ *
+ * Order matches afs_file_delete's: name first, then the cache record, then the
+ * block. After the first step the name is gone whatever follows, so a later
+ * failure leaks storage rather than leaving a nameless entry.
+ *
+ * A soft link is removed exactly this way. From the AmigaDOS Developer's
+ * Manual: "If a soft link is deleted then its file header block is freed." The
+ * link stores a path STRING, so there is no reference to repair and no target
+ * to touch -- removing it cannot require rewriting the target's name, which is
+ * what this code previously claimed.
+ */
+int afs_link_remove(afs_volume_t *v, uint32_t dirblock,
+                    const char *name, size_t namelen,
+                    char *errbuf, size_t errlen);
+
 /* Create a HARD link: a second directory name for an existing file (M24).
  *
  * The new block is its OWN entry header -- it does not share the target's

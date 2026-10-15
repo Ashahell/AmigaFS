@@ -745,22 +745,26 @@ static int cmd_rm(const char *image, const char *path) {
             afs_volume_close(v);
             return 1;
         }
-    } else if (e.kind == AFS_BLOCK_LINKFILE) {
-        /* A hard link is only a name. Removing it frees its own header block and
+    } else if (e.kind == AFS_BLOCK_LINKFILE || e.kind == AFS_BLOCK_SOFTLINK) {
+        /* A link is only a name. Removing it frees its own header block and
          * leaves the target and its data untouched -- so the CLI must be able to
-         * undo what `afs link` created (M24). */
-        uint32_t gone = 0;
-        if (afs_dir_unlink(v, dirblk, base, strlen(base), &gone,
-                           err, sizeof err) != 0) {
+         * undo what `afs link` created (M24), and M31's `afs symlink` too.
+         *
+         * This used to call afs_dir_unlink directly, which splices the NAME out
+         * and nothing else, under a comment claiming the block was freed. It was
+         * not: measured, unlinking a hard link left the free-block count at 1412
+         * where the comment said 1413, and no gate could see it. afs_link_remove
+         * is the complete operation (name, dir-cache record, block) so that no
+         * shell can do half of it. */
+        if (afs_link_remove(v, dirblk, base, strlen(base),
+                            err, sizeof err) != 0) {
             fprintf(stderr, "afs: cannot rm %s: %s\n", path, err);
             afs_volume_close(v);
             return 1;
         }
     } else {
         fprintf(stderr, "afs: cannot rm %s: %s\n", path,
-                e.kind == AFS_BLOCK_SOFTLINK
-                    ? "soft links are not supported yet"
-                    : "unsupported entry type");
+                "unsupported entry type");
         afs_volume_close(v);
         return 1;
     }

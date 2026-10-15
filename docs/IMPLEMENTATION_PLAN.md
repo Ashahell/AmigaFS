@@ -935,6 +935,91 @@ finds the thing — verified by planting an instance in `test_dir.c` and watchin
 versions pass straight over it.
 
 
+## M32 — unlinking a link leaked its block, and no gate could see it (2026-10-15)
+
+Found by **measuring a code comment**, the same move as M31's dir-cache record.
+`afs rm`'s hard-link branch and the mount's `.unlink` both said:
+
+> A hard link is only a name. Removing it frees its own header block and leaves
+> the target and its data untouched.
+
+Neither freed anything. Measured on `testffs.adf`:
+
+```
+after hard link:  free = 1412
+after rm h1:      free = 1412      <- the comment says 1413
+```
+
+One block per unlinked link, leaked permanently: the name is gone, the entry is
+unreachable, and the block stays marked allocated so no allocator will hand it
+out again.
+
+**Why no gate caught it** — the more interesting half:
+
+- `afs verify` does not consult the bitmap at all
+- `afs verify --strict` checks only the OTHER direction ("referenced by the tree
+  but marked free"); on these stale fixtures it produces 11 complaints that
+  have nothing to do with a leak
+- **nothing anywhere detects "marked allocated, referenced by nothing"** — there
+  is no orphan detection in `verify.c` at all
+- the unit tests call the library directly, so reverting the **shell** to the
+  half-operation passes them (mutant M3, measured)
+
+**Fix:** `afs_link_remove` — name, dir-cache record, block, in that order. It is
+a *separate* function rather than a flag on `afs_dir_unlink` because **rename
+calls `afs_dir_unlink` and then rewrites that same block**: freeing inside the
+chain primitive would free a live entry mid-rename. The chain operation and the
+release operation are different things and only one is ever wanted.
+
+**Soft-link removal ships with it.** The refusal said a soft link *"cannot be
+removed without touching its target's name"*. The AmigaDOS Developer's Manual
+says otherwise: *"If a soft link is deleted then its file header block is
+freed."* The link stores a path **string**, so there is no reference to repair
+and no target to touch. Both shells now accept `AFS_BLOCK_SOFTLINK`.
+
+**Oracle status, measured before designing the gate:**
+
+- **amitools cannot witness soft links at all** — `xdftool` refuses to even LIST
+  a directory containing one (`Unsupported Dir Block(8) block=@906, Sub_Type:
+  00000003`). It can neither confirm nor refute anything here. Pinned in the gate.
+- **ADFlib refuses to remove one, and non-atomically**: `adfRemoveEntry`'s final
+  `else` rejects `ST_SOFTLINK` — but *after* it has already unhooked the entry
+  from the parent's hash chain and written the parent block. So ADFlib leaves a
+  half-removed entry, which is worth knowing if it is ever used as a reference.
+- ADFlib *can* read soft links, so it remains the oracle for visibility, and the
+  gate uses exactly that: a stale dir-cache record keeps a deleted link visible
+  to `adfls` after our reader dropped the name.
+
+**Also corrected:** `AFS_PROBLEM_BITMAP_MISMATCH`'s comment claimed to detect
+"used but marked free, **or free but marked used**". Only the first direction is
+implemented. Per rule 251 the claim now matches the code.
+
+**Gate** `m32_link_unlink.sh` (28 → 29 gates). Four mutants, all load-bearing,
+including the two the unit tests miss:
+
+| mutant | gate result |
+|---|---|
+| shells revert to `afs_dir_unlink` | `FAIL unlinking a hard link leaked its block` |
+| FUSE `unlink` reverts | `FAIL the mount leaked a block` |
+| drop the dir-cache delete | `FAIL ADFlib can still see a link we deleted` |
+| soft links refused again | `FAIL the CLI refused to remove a soft link` |
+
+**Rules M32**
+
+- **M32.1 — Measure the comment.** "Frees its own header block" was the most
+  confident sentence in the file and was false. Code comments about behaviour are
+  claims; `free` is a function name that has to mean something.
+- **M32.2 — A checker cannot find a defect it was never asked about.** `verify`
+  is a *damage* checker and a stale map is ordinary on a real Amiga disk, so it
+  deliberately does one direction. That is the right design and it means **a
+  writer's leak is invisible to it**. Assert on the bitmap directly.
+- **M32.3 — A leak is the one defect no structural check can see.** Every pointer
+  still resolves; nothing is corrupt; the volume verifies. Only the *count* is
+  wrong. Reach for a round-trip invariant, not a consistency check.
+- **M32.4 — Ask what an oracle can actually witness before building a gate on
+  it.** Here one oracle is structurally blind and the other's refusal is
+  non-atomic. A gate built on either would have asserted nothing.
+
 ## M31 — soft-link creation, and two defects only the outside could see (2026-10-15)
 
 `afs_symlink` (library), `afs symlink` (CLI) and `.symlink` (mount). The last
@@ -1048,6 +1133,15 @@ extract nothing — a state our own reader accepts.
 - **Rule (M26):** re-measure an inherited claim before building on it. The plan's "extension chains are not implemented, needed above ~50 MB" was wrong in both halves — 600 KB files round-trip correctly. The 312 KB wall it appeared behind was a *bitmap* bug, and the error message pointed at neither.
 - **Rule (M28):** a bitmap bit has TWO coordinate spaces. `afs_bitmap_set/test` address an ASSEMBLED map at offset 0; a raw bitmap PAGE carries its own checksum long in bytes 0..3, so map data starts at `+4` (`afs_bitmap_read` assembles from `blk + 4`). Mixing them writes bits into the checksum word and produces a map no reader agrees with -- seen three times now: `verify.c`'s page reader, `test_verify.c`'s `bm_set()`, and the write fuzzer's fixture. When touching bitmap code, name the space in the comment.
 - **Rule (M30):** ask the ORACLE about your own fixtures, not only about downloaded images. Until M30 it had never been pointed at one, and a small hand-built volume is exactly where the subtle offsets live.
+- **Rule (M32):** measure the comment, and reach for a round trip. Unlinking a
+  link leaked its block while both call sites said in plain words that it freed
+  it. No gate saw it: `afs verify` never consults the bitmap, `--strict` checks
+  only the other direction, and nothing detects "marked allocated, referenced by
+  nothing". **A leak is the one defect no structural check can catch** — every
+  pointer still resolves and the volume verifies; only the COUNT is wrong. Also:
+  **ask what an oracle can witness before gating on it** — amitools cannot even
+  list a directory containing a soft link, and ADFlib's refusal is non-atomic
+  (it unhooks the name, writes the parent, and *then* rejects).
 - **Rule (M31):** two things a unit test cannot reach. **(1) Do not write a constraint about a format from reasoning — read what a real implementation wrote.** The dir-cache record was skipped on the argument that `size=0` "would teach the cache this name is an empty file"; the fixture's own soft link sits in cache block 881 as `size=0 sec_type=3`, and `adfls` could not see our links until we wrote one. **(2) Two same-typed parameters in an order that contradicts every sibling and the call that names them swap silently.** `fuse_lowlevel.h`'s `.symlink` is `(req, link, parent, name)` — the reverse of `.link` and of POSIX's own word order — and the swap compiles clean, producing a well-formed volume with an entry named after the *target*. The general form: **a self-consistent wrong result is the hardest kind to catch**, so when two implementations of one spec exist and they disagree, find out which of you is wrong before assuming it is the other.
 - **Rule (M30):** do not write a constraint from reasoning about a tool's limits -- MEASURE it. This record's first draft asserted ADFlib could not open a volume under a floppy and listed the 16-block fixtures as permanently oracle-blind. Untested and wrong: ADFlib infers geometry from the file and reads an 8 KiB volume as `HardFile 8.0 KBytes`. The gap was never size; it was that nobody had asked.
 - **Rule (M30):** assert an oracle's AGREEMENT with a known-good reference, never a literal label. `adfinfo` prints `DOS(FFS)` for real DOS\5 fixtures too, so asserting `DIRCACHE` asserts a string the oracle emits for nothing; `unadf`'s banner is where the distinction actually appears.
