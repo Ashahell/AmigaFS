@@ -3,6 +3,7 @@
 #include "amigafs/be.h"
 #include "amigafs/checksum.h"
 #include "amigafs/hash.h"
+#include "amigafs/links.h"
 #include "amigafs/names.h"
 #include "amigafs/translate.h"
 
@@ -684,6 +685,10 @@ int afs_dir_unlink(afs_volume_t *v, uint32_t dirblock,
             goto out;
         }
     }
+    /* Reaching here means the entry WAS spliced out (every failure `goto out`s),
+     * so a hard link must also leave its real entry's next_link chain or it
+     * keeps counting towards nlink and `ls -l` over-reports (M24). */
+    afs_link_after_unlink(v, cur);
     *block_out = cur;
     rc = 0;
 out:

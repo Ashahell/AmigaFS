@@ -46,6 +46,21 @@ static void synth_init(synth_t *s, uint8_t flags) {
     r[BS - 80] = 4; memcpy(r + BS - 79, "synt", 4);
     put_be32(r + BS - 4, AFS_ST_ROOT);
     put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    /* The bitmap page at 881 (named by r+316 above). Without this every block
+     * reads as USED (bit 0) and any allocating call reports "volume full" --
+     * which is why the read-only link tests never noticed it was absent.
+     * Everything is free except the boot block, the rootblock and this page. */
+    uint8_t *bm = s->img + 881 * BS;
+    memset(bm, 0xFF, BS);                      /* 1 = free */
+    memset(bm, 0, 4);                          /* the page's own checksum long */
+    size_t pagebits = (size_t)(BS - 4) * 8u;   /* 508 bytes of map data */
+    for (size_t b = pagebits; b < (size_t)(BS - 4) * 8u; b++)
+        bm[4 + b / 8] &= (uint8_t)~(0x80u >> (b % 8));   /* past the volume */
+    bm[4 + 0 / 8]  &= (uint8_t)~(0x80u >> (0 % 8));     /* block 0: boot */
+    bm[4 + ROOT / 8] &= (uint8_t)~(0x80u >> (ROOT % 8)); /* block ROOT */
+    bm[4 + 881 / 8] &= (uint8_t)~(0x80u >> (881 % 8)); /* this page */
+    put_be32(bm, afs_block_checksum(bm, BS, 0));
 }
 
 /* a real file entry with byte_size 0 */
@@ -340,8 +355,251 @@ static void test_softlink_relative_from_subdir(void) {
     afs_volume_close(v);
 }
 
+/* --- M24: creating a hard link ------------------------------------------
+ *
+ * Layout taken from GROUND TRUTH, not from memory. Block 891 of links.adf is a
+ * hard link written by a real AmigaDOS filesystem, and reads as
+ *
+ *     primary 0x00000002 (T_HEADER)   secType -4 (ST_LINKFILE)
+ *     real_entry (0x1d4) = the TARGET's header block
+ *     byte_size 0, no data blocks, extension 0, parent = the directory
+ *     name as a BCPL string at bs-80, and the block filed into the parent's
+ *     hash chain exactly like any other entry
+ *
+ * ADFlib agrees on the offsets: AdfEntryBlock puts realEntry at 0x1d4, parent at
+ * 0x1f4 and extension at 0x1f8 -- BSIZE-12 and BSIZE-8, the offsets used here.
+ *
+ * The next_link chain (BSIZE-40) is hung off the TARGET, not the link, and
+ * links.adf reads FILE.next_link -> LINKFILE -> 0 for both of its links.
+ * afs_file_nlink walks exactly that chain, so a link that is not appended would
+ * resolve to the right file and still report nlink 1.
+ *
+ * Neither oracle can CREATE a link (ADFlib has no link API, xdftool has no link
+ * command) but unadf READS them, so it is the oracle for the result -- subject to
+ * the contract pinned by m24_unadf_link_blindness.sh.
+ */
+static void test_create_hard_link(void) {
+    synth_t s;
+    synth_init(&s, 0x01);              /* FFS: hard links are an FFS-only feature */
+    afs_volume_t *v = synth_open(&s);
+    if (!v) { CHECK(0, "volume opens"); return; }
+
+    /* a real file with content, made through the public write path */
+    static const char payload[] = "hello hard link";
+    const size_t plen = sizeof payload - 1;
+    uint32_t target = 0;
+    char err[256] = {0};
+    CHECK_EQ_U(afs_file_create(v, ROOT, "orig", 4, &target, err, sizeof err), 0,
+               "created the target file");
+    CHECK_EQ_U(afs_file_write_all(v, target, payload, plen, err, sizeof err), 0,
+               "wrote the target's content");
+
+    uint32_t link = 0;
+    CHECK_EQ_U(afs_file_link(v, ROOT, "alias", 5, target, &link, err, sizeof err), 0,
+               "created a hard link to it");
+    CHECK(link != 0 && link != target, "the link owns its OWN header block");
+
+    /* the block must match the ground-truth shape field for field */
+    uint8_t lb[BS];
+    if (afs_volume_read_block(v, link, lb, BS) == 0) {
+        CHECK_EQ_U(be32(lb), AFS_T_HEADER, "link primary is T_HEADER");
+        CHECK_EQ_U((uint32_t)(int32_t)be32(lb + BS - 4), 0xFFFFFFFCu,
+                   "link secType is ST_LINKFILE (-4)");
+        CHECK_EQ_U(be32(lb + 0x1d4), target, "real_entry names the target");
+        CHECK_EQ_U(be32(lb + BS - 188), 0, "a link carries byte_size 0");
+        CHECK_EQ_U(be32(lb + BS - 8), 0, "a link has no extension block");
+        CHECK_EQ_U(be32(lb + BS - 12), ROOT, "parent is the containing directory");
+        CHECK_EQ_U(lb[BS - 80], 5, "name length byte");
+        CHECK(memcmp(lb + BS - 79, "alias", 5) == 0, "name bytes");
+        CHECK(afs_block_valid(lb, BS, 20), "link block checksum valid");
+    } else {
+        CHECK(0, "could not read the link block back");
+    }
+
+    /* the chain is hung off the TARGET, per links.adf */
+    uint8_t tb[BS];
+    if (afs_volume_read_block(v, target, tb, BS) == 0) {
+        CHECK_EQ_U(be32(tb + BS - 40), link, "target's next_link points at the link");
+        CHECK(afs_block_valid(tb, BS, 20), "rewritten target block checksum valid");
+    }
+
+    /* both names must yield identical bytes through the ONE real file */
+    void *a = NULL, *b2 = NULL;
+    size_t alen = 0, blen = 0;
+    CHECK_EQ_U(afs_file_read_all(v, ROOT, "orig", 4, &a, &alen), 0,
+               "read through the original name");
+    CHECK_EQ_U(afs_file_read_all(v, ROOT, "alias", 5, &b2, &blen), 0,
+               "read through the link name");
+    CHECK(a && b2 && alen == blen && alen == plen && memcmp(a, payload, alen) == 0,
+          "the original still reads its own bytes");
+    CHECK(memcmp(a, b2, blen) == 0, "and the link reads the same bytes");
+    free(a); free(b2);
+
+    unsigned nl = 0;
+    CHECK_EQ_U(afs_file_nlink(v, ROOT, "orig", 4, &nl), 0, "nlink of the original");
+    CHECK_EQ_U(nl, 2u, "the file now has two names");
+
+    /* removing ONE name must leave the other, and its data, intact */
+    uint32_t gone = 0;
+    CHECK_EQ_U(afs_dir_unlink(v, ROOT, "alias", 5, &gone, err, sizeof err), 0,
+               "removed the link name");
+    CHECK_EQ_U(gone, link, "unlink freed the link's OWN block, not the target");
+    void *c = NULL; size_t clen = 0;
+    CHECK_EQ_U(afs_file_read_all(v, ROOT, "orig", 4, &c, &clen), 0,
+               "the original still reads after unlinking the alias");
+    CHECK(c && clen == plen && memcmp(c, payload, clen) == 0,
+          "and its bytes are unchanged");
+    free(c);
+    CHECK_EQ_U(afs_file_nlink(v, ROOT, "orig", 4, &nl), 0, "nlink after removal");
+    CHECK_EQ_U(nl, 1u, "back to one name: unlink unhooked the chain");
+
+    afs_volume_close(v);
+}
+
+/* The refusals. Each must be a NAMED reason, not a half-written volume. */
+static void test_create_hard_link_refusals(void) {
+    synth_t s;
+    synth_init(&s, 0x01);
+    afs_volume_t *v = synth_open(&s);
+    if (!v) { CHECK(0, "volume opens"); return; }
+
+    uint32_t target = 0, dirblk = 0, link = 0;
+    char err[256];
+    CHECK_EQ_U(afs_file_create(v, ROOT, "orig", 4, &target, err, sizeof err), 0,
+               "created a target");
+    CHECK_EQ_U(afs_dir_mkdir(v, ROOT, "sub", 3, &dirblk, err, sizeof err), 0,
+               "created a directory");
+
+    err[0] = 0;
+    CHECK(afs_file_link(v, ROOT, "orig", 4, target, &link, err, sizeof err) != 0,
+          "refuses a duplicate name");
+    CHECK(err[0] != 0, "  ...and says why: %s", err);
+
+    err[0] = 0;
+    CHECK(afs_file_link(v, ROOT, "sub", 3, target, &link, err, sizeof err) != 0,
+          "refuses to overwrite an existing directory");
+    CHECK(err[0] != 0, "  ...and says why: %s", err);
+
+    err[0] = 0;
+    CHECK(afs_file_link(v, ROOT, "a/b", 3, target, &link, err, sizeof err) != 0,
+          "refuses an invalid name");
+    CHECK(err[0] != 0, "  ...and says why: %s", err);
+
+    err[0] = 0;
+    CHECK(afs_file_link(v, ROOT, "dirlink", 7, dirblk, &link, err, sizeof err) != 0,
+          "refuses a DIRECTORY target (that would be a cycle, C12)");
+    CHECK(err[0] != 0, "  ...and says why: %s", err);
+
+    err[0] = 0;
+    CHECK(afs_file_link(v, ROOT, "oob", 3, 99999, &link, err, sizeof err) != 0,
+          "refuses an out-of-range target");
+    CHECK(err[0] != 0, "  ...and says why: %s", err);
+
+    /* nothing above may have created an entry */
+    afs_dirent_t e;
+    CHECK(afs_dir_lookup(v, ROOT, "oob", 3, &e) != 0, "no entry left behind");
+    CHECK(afs_file_nlink(v, ROOT, "orig", 4, &(unsigned){0}) == 0,
+          "the target is untouched by the refused calls");
+    afs_volume_close(v);
+
+    /* hard links do not exist on OFS */
+    synth_t o;
+    synth_init(&o, 0x00);
+    afs_volume_t *ov = synth_open(&o);
+    if (ov) {
+        uint32_t t2 = 0, l2 = 0;
+        CHECK_EQ_U(afs_file_create(ov, ROOT, "f", 1, &t2, err, sizeof err), 0,
+                   "created a target on an OFS volume");
+        err[0] = 0;
+        CHECK(afs_file_link(ov, ROOT, "g", 1, t2, &l2, err, sizeof err) != 0,
+              "refuses hard links on an OFS volume (no link secondary type there)");
+        CHECK(strstr(err, "OFS") != NULL, "  ...naming OFS as the reason: %s", err);
+        afs_volume_close(ov);
+    }
+}
+
+/* A SECOND link to the same target must extend the chain, not replace it. */
+static void test_create_two_links_chain(void) {
+    synth_t s;
+    synth_init(&s, 0x01);
+    afs_volume_t *v = synth_open(&s);
+    if (!v) { CHECK(0, "volume opens"); return; }
+
+    uint32_t target = 0, l1 = 0, l2 = 0;
+    char err[256] = {0};
+    CHECK_EQ_U(afs_file_create(v, ROOT, "orig", 4, &target, err, sizeof err), 0,
+               "created the target");
+    CHECK_EQ_U(afs_file_link(v, ROOT, "one", 3, target, &l1, err, sizeof err), 0,
+               "first link created");
+    CHECK_EQ_U(afs_file_link(v, ROOT, "two", 3, target, &l2, err, sizeof err), 0,
+               "second link created");
+
+    unsigned nl = 0;
+    CHECK_EQ_U(afs_file_nlink(v, ROOT, "orig", 4, &nl), 0, "nlink query succeeds");
+    CHECK_EQ_U(nl, 3u, "three names share the one inode");
+    CHECK(l1 != l2, "each link is its own block");
+
+    /* both links must resolve through the one target */
+    void *p1 = NULL, *p2 = NULL;
+    size_t n1 = 0, n2 = 0;
+    CHECK_EQ_U(afs_file_read_all(v, ROOT, "one", 3, &p1, &n1), 0,
+               "link 'one' resolves");
+    CHECK_EQ_U(afs_file_read_all(v, ROOT, "two", 3, &p2, &n2), 0,
+               "link 'two' resolves");
+    free(p1); free(p2);
+
+    uint32_t gone = 0;
+    CHECK_EQ_U(afs_dir_unlink(v, ROOT, "one", 3, &gone, err, sizeof err), 0,
+               "removed one link");
+    CHECK_EQ_U(afs_file_nlink(v, ROOT, "orig", 4, &nl), 0, "nlink after one removal");
+    CHECK_EQ_U(nl, 2u, "removing one leaves the other linked");
+    CHECK_EQ_U(afs_file_nlink(v, ROOT, "two", 3, &nl), 0, "the other name still resolves");
+    CHECK_EQ_U(nl, 2u, "  ...and agrees on the count");
+    afs_volume_close(v);
+}
+
+/* afs_nlink_for_block is the FUSE stat path's entry point: it holds a header
+ * block, never a name. It must agree with afs_file_nlink for EVERY name of the
+ * inode -- an under-reported st_nlink makes the kernel free a file that still
+ * has names pointing at it. */
+static void test_nlink_for_block(void) {
+    synth_t s;
+    synth_init(&s, 0x01);
+    afs_volume_t *v = synth_open(&s);
+    if (!v) { CHECK(0, "volume opens"); return; }
+
+    uint32_t target = 0, l1 = 0;
+    char err[256] = {0};
+    unsigned n = 0;
+    CHECK_EQ_U(afs_file_create(v, ROOT, "orig", 4, &target, err, sizeof err), 0,
+               "created the target");
+    CHECK_EQ_U(afs_nlink_for_block(v, target, &n), 0, "count by block succeeds");
+    CHECK_EQ_U(n, 1u, "a fresh file has one name");
+
+    CHECK_EQ_U(afs_file_link(v, ROOT, "one", 3, target, &l1, err, sizeof err), 0,
+               "created a link");
+
+    /* the SAME number from both entry points, for both names */
+    unsigned by_block = 0, by_name = 0;
+    CHECK_EQ_U(afs_nlink_for_block(v, target, &by_block), 0, "count by block again");
+    CHECK_EQ_U(afs_file_nlink(v, ROOT, "orig", 4, &by_name), 0, "count by name");
+    CHECK_EQ_U(by_block, by_name, "block and name counts agree");
+    CHECK_EQ_U(by_block, 2u, "two names now");
+    CHECK_EQ_U(afs_nlink_for_block(v, l1, &by_block), 0,
+               "counting from the LINK's own block works too");
+    CHECK_EQ_U(by_block, 2u, "  ...and gives the same answer");
+
+    CHECK(afs_nlink_for_block(v, 0, &n) != 0, "refuses block 0");
+    CHECK(afs_nlink_for_block(v, 99999, &n) != 0, "refuses an out-of-range block");
+    afs_volume_close(v);
+}
+
 int main(void) {
     printf("links\n");
+    test_nlink_for_block();
+    test_create_hard_link();
+    test_create_two_links_chain();
+    test_create_hard_link_refusals();
     test_hardlink_file();
     test_hardlink_nlink();
     test_hardlink_dir_is_symlink();

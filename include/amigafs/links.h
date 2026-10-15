@@ -40,6 +40,14 @@ int afs_link_resolve_file(afs_volume_t *v, uint32_t dirblock,
 int afs_file_nlink(afs_volume_t *v, uint32_t dirblock,
                    const char *name, size_t namelen, unsigned *out);
 
+/* The same count by HEADER BLOCK, for callers that hold a block rather than a
+ * name -- the FUSE layer's stat path, which resolves an inode to a block and
+ * never sees the directory entry it came from. Counts the real entry plus every
+ * entry in its next_link chain, so it is the same number afs_file_nlink would
+ * report for any of that inode's names. Returns 0 on success and writes at
+ * least 1. */
+int afs_nlink_for_block(afs_volume_t *v, uint32_t hdrblock, unsigned *out);
+
 /* Pure translator: turn an Amiga softlink target string into a mount-relative
  * POSIX path. `depth` is how many directories deep the link sits (0 = root);
  * a relative multi-component target gains one "../" per level. */
@@ -50,5 +58,50 @@ int afs_softlink_translate(const char *raw, unsigned depth, char *out, size_t ca
 int afs_softlink_target(afs_volume_t *v, uint32_t dirblock,
                         const char *name, size_t namelen,
                         char *out, size_t cap);
+
+/* Create a HARD link: a second directory name for an existing file (M24).
+ *
+ * The new block is its OWN entry header -- it does not share the target's
+ * header -- carrying `real_entry` pointing at the target, so the two names
+ * resolve to ONE inode with an nlink of 2. That is AmigaDOS's arrangement:
+ * "A new file header block is added for each link created."
+ *
+ * Layout is taken from GROUND TRUTH rather than memory. Block 891 of links.adf,
+ * written by a real AmigaDOS filesystem, reads as
+ *
+ *     primary T_HEADER, secType ST_LINKFILE (-4)
+ *     real_entry (0x1d4) = the target's header block
+ *     byte_size 0, no data blocks, extension 0, parent = the directory
+ *
+ * ADFlib's AdfEntryBlock puts realEntry at 0x1d4, parent at 0x1f4 and extension
+ * at 0x1f8 -- BSIZE-12 and BSIZE-8, the offsets used here.
+ *
+ * The next_link chain (BSIZE-40) is hung off the TARGET, not off the link: both
+ * of links.adf's links read FILE.next_link -> LINKFILE -> 0. afs_file_nlink
+ * walks exactly that chain, so a link that was not appended would resolve to the
+ * right file and still report nlink 1.
+ *
+ * FFS only -- hard links do not exist on an OFS volume, which has no link
+ * secondary type, so writing one would produce a file no Amiga reads. Refuses a
+ * duplicate name, an invalid name, an out-of-range target, and any non-file
+ * target, each with a NAMED reason rather than half-written state; a directory
+ * target is refused because a directory hard link is the cycle C12 exists to
+ * avoid.
+ *
+ * `*link_out` receives the NEW header block. Unlinking the new name frees only
+ * that block and leaves the target and its data untouched; afs_dir_unlink also
+ * unhooks the chain so the name stops counting towards nlink. */
+int afs_file_link(afs_volume_t *v, uint32_t dirblock,
+                  const char *name, size_t namelen, uint32_t target,
+                  uint32_t *link_out, char *errbuf, size_t errlen);
+
+/* Called by afs_dir_unlink once a name has been spliced out of its directory,
+ * so a removed hard link also leaves the real entry's next_link chain and stops
+ * counting towards nlink. A no-op for anything that is not a hard link.
+ *
+ * Deliberately AFTER the splice: a chain failure then leaves the name already
+ * gone, which is the safe direction -- an over-reported nlink is recoverable,
+ * a name that survives an unlink is not. */
+void afs_link_after_unlink(afs_volume_t *v, uint32_t entryblock);
 
 #endif /* AMIGAFS_LINKS_H */

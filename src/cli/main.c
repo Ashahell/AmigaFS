@@ -38,6 +38,7 @@ static int usage(void) {
         "  afs put    <image> <partition/path> <local-file>\n"
         "  afs mkdir  <image> <partition/dir>\n"
         "  afs rm     <image> <partition/path>\n"
+        "  afs link   <image> <partition/path> <newname>\n"
         "  afs mv     <image> <partition/src> <partition/dst>\n"
         "On an RDB-partitioned image the first path component names the\n"
         "partition (as in the FUSE mount); `info` alone lists the partitions.\n"
@@ -643,6 +644,42 @@ static int cmd_mkdir(const char *image, const char *path) {
     return 0;
 }
 
+/* afs link <image> <target-path> <newname> -- a HARD link beside the target. */
+static int cmd_link(const char *image, const char *path, const char *newname) {
+    afs_volume_t *v = NULL;
+    uint32_t dirblk = 0;
+    const char *base = NULL;
+    char dirbuf[512], err[256] = {0};
+    afs_dirent_t e;
+
+    if (!newname || !*newname) {
+        fprintf(stderr, "afs: link needs a new name\n");
+        return 2;
+    }
+    /* The new name goes in the SAME directory as the target. Unlike mv, a link
+     * cannot move the entry, so there is no second path to resolve -- and that
+     * is also what keeps both names on one volume. */
+    if (open_parent_rw(image, path, &v, &dirblk, &base, dirbuf, sizeof dirbuf) != 0)
+        return 1;
+    if (afs_dir_lookup(v, dirblk, base, strlen(base), &e) != 0) {
+        fprintf(stderr, "afs: %s: not found\n", path);
+        afs_volume_close(v);
+        return 1;
+    }
+    uint32_t link = 0;
+    if (afs_file_link(v, dirblk, newname, strlen(newname), e.block,
+                      &link, err, sizeof err) != 0) {
+        fprintf(stderr, "afs: cannot link %s: %s\n", path, err);
+        afs_volume_close(v);
+        return 1;
+    }
+    unsigned nl = 0;
+    (void)afs_file_nlink(v, dirblk, base, strlen(base), &nl);
+    printf("%s -> %s (%u name%s)\n", newname, base, nl, nl == 1 ? "" : "s");
+    afs_volume_close(v);
+    return 0;
+}
+
 static int cmd_rm(const char *image, const char *path) {
     afs_volume_t *v = NULL;
     uint32_t dirblk = 0;
@@ -669,8 +706,22 @@ static int cmd_rm(const char *image, const char *path) {
             afs_volume_close(v);
             return 1;
         }
+    } else if (e.kind == AFS_BLOCK_LINKFILE) {
+        /* A hard link is only a name. Removing it frees its own header block and
+         * leaves the target and its data untouched -- so the CLI must be able to
+         * undo what `afs link` created (M24). */
+        uint32_t gone = 0;
+        if (afs_dir_unlink(v, dirblk, base, strlen(base), &gone,
+                           err, sizeof err) != 0) {
+            fprintf(stderr, "afs: cannot rm %s: %s\n", path, err);
+            afs_volume_close(v);
+            return 1;
+        }
     } else {
-        fprintf(stderr, "afs: cannot rm %s: links not supported yet\n", path);
+        fprintf(stderr, "afs: cannot rm %s: %s\n", path,
+                e.kind == AFS_BLOCK_SOFTLINK
+                    ? "soft links are not supported yet"
+                    : "unsupported entry type");
         afs_volume_close(v);
         return 1;
     }
@@ -890,6 +941,10 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "rm") == 0) {
         if (argc < 4) { fprintf(stderr, "afs: rm needs a path\n"); return 2; }
         return cmd_rm(image, argv[3]);
+    }
+    if (strcmp(cmd, "link") == 0) {
+        if (argc < 5) { fprintf(stderr, "afs: link needs a path and a new name\n"); return 2; }
+        return cmd_link(image, argv[3], argv[4]);
     }
     if (strcmp(cmd, "mv") == 0) {
         if (argc < 5) { fprintf(stderr, "afs: mv needs source and destination\n"); return 2; }

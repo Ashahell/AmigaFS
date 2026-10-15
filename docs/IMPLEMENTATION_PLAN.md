@@ -667,12 +667,66 @@ load-bearing attempt that blanked the links' `nameLength` was discarded — a ze
 name stops the directory hash-chain walk dead, so it measured its own corruption rather
 than link removal.
 
-**Status.** Link *writing* remains unimplemented and is the last missing filesystem
-operation. It is not blocked for want of an oracle: `links.adf` supplies on-disk ground
-truth (block 891: `secType` −4, `real_entry` at 0x1d4, `byte_size` 0, no data, no
-extension) and `unadf` validates the *result*. What remains is to implement it and hold
-it to the byte-identity contract above — not to re-litigate the chain append, which is
-measured correct.
+**Status.** Link *writing* was **implemented in the next step (M25) and shipped.** See
+below.
+
+## M25 — hard-link writing: shipped, and two defects only a live mount could find (2026-10-15)
+
+M24 left the oracle question settled and the implementation reverted. This step landed
+it, TDD-first, with the on-disk shape read from `links.adf` block 891 (a real
+AmigaDOS link) rather than from memory:
+
+| field | value | source |
+|---|---|---|
+| primary / secType | `T_HEADER` / `ST_LINKFILE` (−4) | block 891 |
+| `real_entry` (0x1d4) | target's header block | block 891 |
+| `byte_size` / extension / data blocks | 0 / none / none | block 891 |
+| `next_link` chain | hung off the **target**, not the link | both of links.adf's links |
+
+**Library** (`afs_file_link`): FFS-only (OFS refused by name — no link secondary type
+exists there), refuses a duplicate name, an invalid name, an out-of-range target and any
+non-file target, each with a named reason. **CLI** `afs link <image> <path> <newname>`.
+**Mount**: the `.link` op for `ln`, and `unlink` of a hard link via `afs_dir_unlink`.
+
+**Two design points worth recording.** `chain_append` runs *before* the directory
+entry is filed, so a chain failure leaves an unreachable block rather than publishing a
+name whose nlink is wrong. And `afs_dir_unlink` now calls `afs_link_after_unlink`,
+because removing the name without unhooking the chain would leave it counting towards
+nlink forever.
+
+**Three defects, each found by a test that could actually reach it:**
+
+1. **The chain splice truncated instead of splicing** — `chain_unhook` wrote `0` into
+   the predecessor's `next_link`, so with the chain `real → one → two`, unlinking `one`
+   dropped `two` as well and nlink fell to 1. Caught by the unit test asserting the
+   *second* link still resolves. The fix reads the removed link's own successor and
+   writes that in its place.
+2. **`ln` returned EIO even though the link was correctly written.** The `.link` op
+   ended in `fuse_reply_err(req, 0)`, but a `.link` op accepts **only**
+   `fuse_reply_entry` or `fuse_reply_err` (`fuse_lowlevel.h`) — a bare success reply
+   makes libfuse fail the write with `writing device: Invalid argument`. The tell was
+   that `afs ls` on the same image already showed the new link: *the operation
+   happened and the caller was told it failed* is the shape of a **reply** bug, not a
+   write bug. Fixed by replying with the new entry, as `mkdir` does.
+3. **`fill_stat` hardcoded `st_nlink = 1`.** The kernel uses `st_nlink` to decide
+   whether an unlink may drop an inode's data, so under-reporting risks freeing a file
+   that still has names pointing at it. Now takes the real count from the new
+   `afs_nlink_for_block` — needed because the stat path resolves an inode to a *block*
+   while `afs_file_nlink` needs a *name*, so the count lives in one shared helper
+   (`nlink_from_real`) rather than twice.
+
+**Gates: `m25_link_write.sh` and `m25_fuse_link.sh` (22nd, 23rd).** The first asserts
+M24's byte-identity contract plus the things the oracle cannot see (the link exists,
+shares the target's bytes, survives a bitmap rebuild, frees only its own block).
+The second drives the **kernel's own `link()`** through a live mount — the only way to
+reach the `.link` op and to check `st_nlink` — and asserts the daemon logged no failed
+FUSE reply. Load-bearing proven by mutants: `real_entry → 0`, `secType → ST_FILE`, no
+chain append, `rm` refusing links, the bare-success-reply regression, and
+`st_nlink → 1`. Each turns a specific assertion red.
+
+`test_nlink_for_block` also caught that the synthetic test volume in `test_links.c`
+had **no bitmap at all** — every block read as USED, so any allocating call reported
+"volume full". The read-only tests never noticed; the first allocating test did.
 
 
 ## 5. Testing strategy

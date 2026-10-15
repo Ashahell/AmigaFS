@@ -121,11 +121,17 @@ static int is_volume_root(unsigned vi, uint32_t blk) {
     return blk == afs_volume_rootblock(g_parts[vi].vol);
 }
 
+/* `nlink` is passed in rather than hardcoded to 1: a hard link is a real
+ * feature (M24) and the kernel uses st_nlink to decide whether an unlink may
+ * drop the inode's data. Under-reporting it makes the kernel free a file that
+ * still has names pointing at it. Callers that have the volume and the header
+ * block get the real count from afs_nlink_for_block; the mount root passes 1
+ * for a directory, which is what POSIX expects there. */
 static void fill_stat(const afs_fileheader_t *fh, fuse_ino_t ino,
-                      mode_t type, struct stat *st) {
+                      mode_t type, unsigned nlink, struct stat *st) {
     memset(st, 0, sizeof *st);
     st->st_ino = (ino_t)ino;
-    st->st_nlink = 1;
+    st->st_nlink = (nlink_t)(nlink ? nlink : 1u);
     afs_translate_mode(fh->protect, st, type);
     afs_translate_ids(g_opt.uid, g_opt.gid, fh->uid, fh->gid,
                       g_opt.amiga_ids, st);
@@ -300,7 +306,9 @@ static void afs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
         afs_fileheader_t h;
         memset(&h, 0, sizeof h);
         if (afs_parse_fileheader(blk, bs, &h) != 0) memset(&h, 0, sizeof h);
-        fill_stat(&h, e.ino, kind_to_mode(k), &e.attr);
+        unsigned nl = 1;
+        (void)afs_nlink_for_block(vol, ino_blk, &nl);
+        fill_stat(&h, e.ino, kind_to_mode(k), nl, &e.attr);
         if (k == AFS_BLOCK_SOFTLINK) e.attr.st_size = 0;
         /* an unparseable header still needs a sane mode */
         if (e.attr.st_mode == 0) {
@@ -359,7 +367,9 @@ static void afs_ll_getattr(fuse_req_t req, fuse_ino_t ino,
         afs_fileheader_t h;
         memset(&h, 0, sizeof h);
         afs_parse_fileheader(blk, bs, &h);
-        fill_stat(&h, ino, kind_to_mode(k), &st);
+        unsigned nl = 1;
+        (void)afs_nlink_for_block(g_parts[vi].vol, blkno, &nl);
+        fill_stat(&h, ino, kind_to_mode(k), nl, &st);
         if (k == AFS_BLOCK_SOFTLINK) st.st_size = 0;
     }
     free(blk);
@@ -736,7 +746,9 @@ static int entry_for_block(unsigned vi, uint32_t blk,
         afs_fileheader_t h;
         memset(&h, 0, sizeof h);
         if (afs_parse_fileheader(b, bs, &h) != 0) memset(&h, 0, sizeof h);
-        fill_stat(&h, e->ino, kind_to_mode(k), &e->attr);
+        unsigned nl = 1;
+        (void)afs_nlink_for_block(vol, blk, &nl);
+        fill_stat(&h, e->ino, kind_to_mode(k), nl, &e->attr);
         if (e->attr.st_mode == 0) e->attr.st_mode = S_IFREG | 0644;
     }
     free(b);
@@ -871,11 +883,96 @@ static void afs_ll_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
             fuse_reply_err(req, err_to_errno(err));
             return;
         }
+    } else if (e.kind == AFS_BLOCK_LINKFILE) {
+        /* A hard link is just a name. Removing it frees only its own header
+         * block; the target and its data are untouched, and afs_dir_unlink
+         * also unhooks the next_link chain so nlink stays right (M24).
+         * Previously every non-file/dir fell through to err_to_errno() with an
+         * EMPTY errbuf, so the errno came from a string that never said
+         * anything. */
+        uint32_t gone = 0;
+        if (afs_dir_unlink(vol, pblk, name, strlen(name), &gone,
+                           err, sizeof err) != 0) {
+            fuse_reply_err(req, err_to_errno(err));
+            return;
+        }
     } else {
-        fuse_reply_err(req, err_to_errno(err));
+        /* A soft link cannot be removed without touching its target's name, so
+         * it stays refused -- but now with a REASON rather than an empty one. */
+        snprintf(err, sizeof err, "soft link removal is not supported");
+        fuse_reply_err(req, EACCES);
         return;
     }
     fuse_reply_err(req, 0);
+}
+
+/* POSIX link(old, new) -- a hard link to an existing FILE (M24).
+ *
+ * libfuse's low-level signature hands us the TARGET'S INODE rather than a name,
+ * and the directory the NEW name goes in, so the two may live in different
+ * directories: `ln a sub/b` arrives with the inode of `a` and newparent = sub. */
+static void afs_ll_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent,
+                        const char *newname) {
+    unsigned tvi = 0, nvi = 0;
+    uint32_t tblk = 0, nblk = 0;
+    size_t bs;
+    uint8_t *tb;
+    afs_block_kind_t kind;
+
+    if (refuse_if_ro(req)) return;
+    if (resolve_ino(ino, &tvi, &tblk) != 0) {
+        fuse_reply_err(req, ENOENT);
+        return;
+    }
+    if (newparent == FUSE_ROOT_ID) newparent = INO_ROOT;
+    if (parent_dirblock(newparent, &nvi, &nblk) != 0) {
+        fuse_reply_err(req, EIO);
+        return;
+    }
+    /* One filesystem: a link across volumes would be a cross-device rename. */
+    if (tvi != nvi) {
+        fuse_reply_err(req, EXDEV);
+        return;
+    }
+
+    afs_volume_t *vol = g_parts[tvi].vol;
+    bs = afs_volume_block_size(vol);
+    tb = malloc(bs);
+    if (!tb) { fuse_reply_err(req, ENOMEM); return; }
+    if (afs_volume_read_block(vol, tblk, tb, bs) != 0) {
+        free(tb);
+        fuse_reply_err(req, EIO);
+        return;
+    }
+    kind = afs_block_kind(tb, bs);
+    free(tb);
+
+    /* POSIX link() on a directory is EPERM, and AmigaDOS has no directory hard
+     * link we could create anyway -- it would be the cycle C12 avoids. */
+    if (kind == AFS_BLOCK_DIR || kind == AFS_BLOCK_LINKDIR) {
+        fuse_reply_err(req, EPERM);
+        return;
+    }
+    if (kind != AFS_BLOCK_FILE && kind != AFS_BLOCK_LINKFILE) {
+        fuse_reply_err(req, EINVAL);
+        return;
+    }
+
+    /* Linking a name that is ITSELF a hard link must point at the real file,
+     * not nest another link: afs_file_link resolves through real_entry. */
+    char err[256] = {0};
+    uint32_t link = 0;
+    if (afs_file_link(vol, nblk, newname, strlen(newname), tblk,
+                      &link, err, sizeof err) != 0) {
+        fuse_reply_err(req, err_to_errno(err));
+        return;
+    }
+    /* A `.link` op accepts ONLY fuse_reply_entry or fuse_reply_err
+     * (fuse_lowlevel.h). A bare success fuse_reply_err(req, 0) makes libfuse
+     * fail the reply with "writing device: Invalid argument", so `ln` reports
+     * EIO even though the link was correctly written to the volume. Reply with
+     * the new entry, as mkdir does. */
+    reply_entry_block(req, nvi, link, NULL, 0);
 }
 
 static void afs_ll_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
@@ -1101,6 +1198,7 @@ static const struct fuse_lowlevel_ops afs_ll_ops = {
     .setattr  = afs_ll_setattr,
     .mkdir    = afs_ll_mkdir,
     .unlink   = afs_ll_unlink,
+    .link     = afs_ll_link,
     .rmdir    = afs_ll_rmdir,
     .rename   = afs_ll_rename,
     .flush    = afs_ll_flush,
