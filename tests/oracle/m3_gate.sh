@@ -72,6 +72,47 @@ if [[ -x "$ROOT/build/afs" ]]; then
     fi
 fi
 
+# --- `afs ls` on a FILE must not report success and print nothing ---------
+#
+# Found by accident while checking the case-insensitivity claim above:
+# `afs ls win32-names.adf /forbidden-files/CON` resolved the path, then listed
+# a FILE block as though it were a directory. Result: rc 0 and ZERO bytes of
+# output.
+#
+# That is the worst shape a CLI failure can take. An error at least stops
+# `afs ls ... && ...`; silence with a success code lets a script proceed as
+# though it had received a listing. GNU `ls` prints the file's own name, so
+# that is what we do, in the existing `f1 /name` format and with the STORED
+# spelling (the entry may differ in case from what was typed).
+LSF="$FIX/win32-names.adf"
+if [[ -x "$ROOT/build/afs" && -f "$LSF" ]]; then
+    got=$("$ROOT/build/afs" ls "$LSF" /forbidden-files/CON 2>/dev/null); rc_file=$?
+    if [[ $rc_file -eq 0 && "$got" == "f1 /CON" ]]; then
+        ok "ls of a file prints its own entry (rc=0, 'f1 /CON')"
+    else
+        bad "ls of a file: rc=$rc_file, output='${got}' (expected rc=0, 'f1 /CON')"
+    fi
+
+    # Typed in lower case: lookup is case-insensitive, so this must still
+    # succeed and must print the STORED spelling, not what was typed. Pins the
+    # stored-name behaviour and cross-checks D5 at the same time.
+    gotl=$("$ROOT/build/afs" ls "$LSF" /forbidden-files/con 2>/dev/null); rc_lower=$?
+    if [[ $rc_lower -eq 0 && "$gotl" == "f1 /CON" ]]; then
+        ok "ls of a file prints the STORED spelling, not the typed one"
+    else
+        bad "ls of a file typed '/con': rc=$rc_lower, output='${gotl}' (expected rc=0, 'f1 /CON')"
+    fi
+
+    # Control: the parent DIRECTORY must be unaffected. Without this, a fix
+    # that special-cased the wrong path would still pass the line above.
+    ndir=$("$ROOT/build/afs" ls "$LSF" /forbidden-files 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$ndir" == "44" ]]; then
+        ok "ls of the containing directory still lists 44 entries"
+    else
+        bad "directory listing changed: ${ndir} entries, expected 44"
+    fi
+fi
+
 echo
 if [[ $fails -eq 0 ]]; then echo "M3 gate: PASS"; exit 0; fi
 echo "M3 gate: $fails failure(s)" >&2

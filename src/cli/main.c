@@ -255,6 +255,7 @@ static int cmd_ls(const char *image, const char *dir, int recursive, int nlink) 
     uint32_t root = afs_volume_rootblock(v);
 
     uint32_t target = root;
+    char lastname[256] = {0};
     if (dir && *dir) {
         /* resolve a leading '/' as the volume root, else walk from root */
         const char *p = dir;
@@ -274,12 +275,48 @@ static int cmd_ls(const char *image, const char *dir, int recursive, int nlink) 
                     return 1;
                 }
                 target = e.block;
+                /* keep the STORED spelling: lookup is case-insensitive, so
+                 * what was typed may not be what is on the volume */
+                snprintf(lastname, sizeof lastname, "%s", e.name);
                 o = 0;
                 while (*p == '/') p++;
                 if (!*p) break;
             }
         }
     }
+    /* A path that resolves to something that is NOT a directory is listed as
+     * its own single entry, the way `ls file` prints the file's name. Listing
+     * a file block as though it were a directory produced rc 0 and NO output,
+     * which is the worst shape a CLI failure can take: an error would at least
+     * stop `afs ls ... && ...`, but silence with a success code lets a script
+     * proceed as though it had been handed a listing.
+     *
+     * The name printed is the STORED spelling, which may differ in case from
+     * what the user typed, and matches what the containing directory lists. */
+    if (!(dir && *dir)) {
+        /* listing the volume root: always a directory */
+    } else {
+        afs_block_kind_t tk = AFS_BLOCK_ROOT;
+        uint8_t *tb = malloc(afs_volume_block_size(v));
+        if (tb && afs_volume_read_block(v, target, tb,
+                                        afs_volume_block_size(v)) == 0) {
+            tk = afs_block_kind(tb, afs_volume_block_size(v));
+        }
+        free(tb);
+        if (tk != AFS_BLOCK_ROOT && tk != AFS_BLOCK_DIR) {
+            char kind = 'f';
+            switch (tk) {
+            case AFS_BLOCK_SOFTLINK: kind = 'l'; break;
+            case AFS_BLOCK_LINKFILE: kind = 'h'; break;
+            case AFS_BLOCK_LINKDIR:  kind = 'D'; break;
+            default: break;
+            }
+            printf("%c1 /%s\n", kind, lastname);
+            afs_volume_close(v);
+            return 0;
+        }
+    }
+
     ls_rec(v, target, "", 0, recursive ? 64 : 0, nlink);
     afs_volume_close(v);
     return 0;
