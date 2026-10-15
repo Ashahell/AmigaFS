@@ -975,6 +975,51 @@ static void afs_ll_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent,
     reply_entry_block(req, nvi, link, NULL, 0);
 }
 
+/* .symlink -- create a soft link.
+ *
+ * The target is NOT resolved, deliberately: POSIX says symlink() creates the
+ * link whatever the target is, including something that does not exist yet, and
+ * refusing here would break `ln -s` for a file the next command creates. Nor is
+ * the target translated to a POSIX path on the way in -- it is stored verbatim in
+ * AmigaDOS syntax and only `readlink`/lookup translate it, because the same
+ * bytes have to mean the same thing to a real Amiga reading the volume.
+ *
+ * This is the asymmetry with `readlink`: readlink hands back the TRANSLATED
+ * path, which is what the kernel needs to resolve through the mount. */
+static void afs_ll_symlink(fuse_req_t req, const char *target, fuse_ino_t parent,
+                           const char *name) {
+    /* NOTE the parameter names, which follow fuse_lowlevel.h's OWN doc comment:
+     *     symlink(req, link, parent, name)
+     *   @param link   the contents of the symbolic link
+     *   @param name   to create
+     * The order is the reverse of every other *link op here (.link is
+     * (req, ino, newparent, newname)) and of the POSIX call's own word order
+     * (symlink(target, linkpath)). Both string parameters are `const char *`, so
+     * the swap compiles cleanly and produces a SELF-CONSISTENT volume: an entry
+     * named after the target, holding the link name as its content. Verified by
+     * measurement -- `ln -s tgt firstlink` created an entry called `tgt`. */
+    if (refuse_if_ro(req)) return;
+    if (!target || !*target) { fuse_reply_err(req, ENOENT); return; }
+    if (!name || !*name) { fuse_reply_err(req, ENOENT); return; }
+
+    unsigned vi = 0;
+    uint32_t pblk = 0;
+    int rc = parent_dirblock(parent, &vi, &pblk);
+    if (rc != 0) { fuse_reply_err(req, rc); return; }
+
+    afs_volume_t *vol = g_parts[vi].vol;
+    char err[256] = {0};
+    uint32_t link = 0;
+    if (afs_symlink(vol, pblk, name, strlen(name), target, strlen(target),
+                    &link, err, sizeof err) != 0) {
+        fuse_reply_err(req, err_to_errno(err));
+        return;
+    }
+    /* Same rule as .link and mkdir: a bare fuse_reply_err(req, 0) is not an
+     * accepted reply here, and libfuse turns that into EINVAL on the write. */
+    reply_entry_block(req, vi, link, NULL, 0);
+}
+
 static void afs_ll_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
     if (refuse_if_ro(req)) return;
     unsigned vi = 0;
@@ -1199,6 +1244,7 @@ static const struct fuse_lowlevel_ops afs_ll_ops = {
     .mkdir    = afs_ll_mkdir,
     .unlink   = afs_ll_unlink,
     .link     = afs_ll_link,
+    .symlink  = afs_ll_symlink,
     .rmdir    = afs_ll_rmdir,
     .rename   = afs_ll_rename,
     .flush    = afs_ll_flush,

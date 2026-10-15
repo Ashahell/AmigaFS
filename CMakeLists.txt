@@ -107,7 +107,12 @@ target_link_libraries(m6_damage_probe PRIVATE amigafs_core)
 # These compare the core library against pinned external oracles (ADFlib CLI,
 # amitools) and, for M8, against a real FUSE mount. They need the fixtures and
 # the oracles present, so they are registered but skipped cleanly when not.
-set(AMIGAFS_GATES m23_hash_unreachable m18_bitmap_rebuild m0_gate m2_gate m3_gate m4_gate m5_gate m6_gate m7_gate m8_gate m10_gate m10_mount_gate m11_gate m12_cli_rdb m13_write m14_delete m15_fuse_write m16_write_fuzz fuzz_gate mount_fuzz)
+# Kept deliberately in the SAME ORDER as tests/run_all_gates.sh's GATES array.
+# The two lists drifting apart is a real failure mode: `ctest` then reports green
+# over a subset of what the audit entry point actually runs, which is the
+# "a green run was not testing what it claimed" shape. M31 found the CMake list
+# still missing every gate from M23 onward.
+set(AMIGAFS_GATES m23_hash_unreachable m24_unadf_link_blindness m25_link_write m25_fuse_link m26_root_dircache_survives m28_strict_sees_bitmap_mismatch m29_no_raw_page_bitmap_writes m30_fixtures_valid_to_the_oracle m31_symlink_write m18_bitmap_rebuild m0_gate m2_gate m3_gate m4_gate m5_gate m6_gate m7_gate m8_gate m10_gate m10_mount_gate m11_gate m12_cli_rdb m13_write m14_delete m15_fuse_write m16_write_fuzz fuzz_gate mount_fuzz)
 foreach(g ${AMIGAFS_GATES})
   add_test(NAME gate_${g}
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/oracle/${g}.sh)

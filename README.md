@@ -89,6 +89,8 @@ store them, and a silent success would be worse than a refusal.
 ./build/afs bitmap disk.adf              # free/used block summary
 ./build/afs bitmap-rebuild disk.adf --dry-run   # what a rebuild would reclaim
 ./build/afs bitmap-rebuild disk.adf --yes       # rebuild it (frees unreferenced blocks)
+./build/afs link    disk.adf /target newname    # HARD link beside an existing entry
+./build/afs symlink disk.adf /newlink target    # SOFT link (target need not exist)
 ```
 
 `afs ls` marks each entry: `d` directory, `f` file, `l` symlink, `h` file with
@@ -156,13 +158,18 @@ example, and the two traps worth knowing about.
 
 ## Known limits
 
-- **Hard links are written; soft links are not.** `afs link` and the mount's
+- **Hard links and soft links are both written.** `afs link` and the mount's
   `link()` (`ln`) create a hard link, and `unlink` removes one: it frees only
   that name's header block, leaves the target and its data untouched, and
   unhooks the link from the inode's chain so `st_nlink` stays accurate.
-  **Soft links are still refused** by `afs rm` and the mount's `unlink` —
-  creating a soft link is a separate feature. `afs mv` refuses both, matching
-  ADFlib's `adfRemoveEntry`/`adfRenameEntry`, which handle FILE/DIR only.
+  `afs symlink` and the mount's `symlink()` (`ln -s`) create a **soft** link.
+  The target is stored verbatim in AmigaDOS path syntax (`a/b`, `/x`, `Vol:/x`
+  all legal) and is deliberately **not resolved** — pointing at something that
+  does not exist yet is the point of a symlink. `readlink` returns the
+  *translated* path, which is what the kernel needs to resolve through the
+  mount. **`unlink` of a soft link is still refused** (removing one means
+  rewriting the target's name). `afs mv` refuses links, matching ADFlib's
+  `adfRemoveEntry`/`adfRenameEntry`, which handle FILE/DIR only.
   Hard links are FFS-only, and refused on OFS by name.
 - **No rename across partitions**, by design: block addresses are
   partition-relative, so a cross-partition move is a copy+delete. The CLI

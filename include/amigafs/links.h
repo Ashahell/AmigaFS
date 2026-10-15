@@ -59,6 +59,39 @@ int afs_softlink_target(afs_volume_t *v, uint32_t dirblock,
                         const char *name, size_t namelen,
                         char *out, size_t cap);
 
+/* Create a SOFT link (M31): a named pointer to a path, stored in the entry's
+ * hash-table area.
+ *
+ * Layout taken from GROUND TRUTH rather than memory. Block 885 of testffs.adf
+ * is a soft link written by a real AmigaDOS, and reads as
+ *
+ *     primary T_HEADER, secType ST_SOFTLINK (3)
+ *     byte_size 0, extension 0, parent = the containing directory
+ *     the target as plain ASCII at offset 24, ZERO-PADDED -- NOT NUL-terminated
+ *
+ * ADFlib's AdfEntryBlock agrees on the fields: secType at BSIZE-4, byte_size at
+ * BSIZE-188, parent at BSIZE-12.
+ *
+ * The zero padding is the detail worth stating: for a 5-byte target, writing
+ * "dir_1\0" is byte-identical to writing "dir_1" into a zeroed block, so a
+ * short-target test passes either way and the difference only appears with a
+ * longer target or a reader that scans past the end. The block is zeroed and
+ * the target copied in, never NUL-appended.
+ *
+ * `target` is stored VERBATIM, in AmigaDOS path syntax ("Vol:/x", "/x", "a/b",
+ * backslashes all legal). Translating it to a POSIX path is a READ-side
+ * concern -- afs_softlink_target -- because the same bytes must round-trip to
+ * whatever an Amiga reads back, and the mount needs a different answer.
+ *
+ * Refuses a duplicate name, an invalid name, an empty target and a target too
+ * long for the block, each with a NAMED reason. `*link_out` receives the new
+ * header block.
+ */
+int afs_symlink(afs_volume_t *v, uint32_t dirblock,
+                const char *name, size_t namelen,
+                const char *target, size_t targetlen,
+                uint32_t *link_out, char *errbuf, size_t errlen);
+
 /* Create a HARD link: a second directory name for an existing file (M24).
  *
  * The new block is its OWN entry header -- it does not share the target's

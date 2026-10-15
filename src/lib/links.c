@@ -397,3 +397,107 @@ int afs_file_link(afs_volume_t *v, uint32_t dirblock,
 void afs_link_after_unlink(afs_volume_t *v, uint32_t entryblock) {
     if (v) chain_unhook(v, entryblock);
 }
+
+int afs_symlink(afs_volume_t *v, uint32_t dirblock,
+                const char *name, size_t namelen,
+                const char *target, size_t targetlen,
+                uint32_t *link_out, char *errbuf, size_t errlen) {
+    size_t bs, capacity;
+    uint32_t nb;
+    uint8_t *b;
+    afs_dirent_t dup;
+
+    if (!v || !name || !target || !link_out) {
+        lk_err(errbuf, errlen, "bad arguments");
+        return -1;
+    }
+    if (!afs_name_valid(name, namelen)) {
+        lk_err(errbuf, errlen, "invalid name (1..30 bytes, no '/' or ':')");
+        return -1;
+    }
+    /* Duplicate-check by the same lookup a later ls will use (INTL folds here) */
+    if (afs_dir_lookup(v, dirblock, name, namelen, &dup) == 0) {
+        lk_err(errbuf, errlen, "'%.*s' already exists", (int)namelen, name);
+        return -1;
+    }
+    if (targetlen == 0) {
+        lk_err(errbuf, errlen, "a soft link needs a non-empty target");
+        return -1;
+    }
+
+    bs = afs_volume_block_size(v);
+    /* The target lives in the hash-table area, which starts at 24 and runs to
+     * BSIZE-192 (where the tail begins). Naming that boundary is what stops a
+     * long target from silently overwriting the entry's own fields. */
+    capacity = bs - 192 - 24;
+    if (targetlen > capacity) {
+        lk_err(errbuf, errlen,
+               "target is %zu bytes; only %zu fit before the entry's own fields",
+               targetlen, capacity);
+        return -1;
+    }
+
+    if (afs_alloc_block(v, &nb, errbuf, errlen) != 0) return -1;
+    b = calloc(1, bs);
+    if (!b) { lk_err(errbuf, errlen, "out of memory"); return -1; }
+
+    /* The block below is block 885 of testffs.adf, field for field. Note the
+     * target is COPIED INTO A ZEROED BLOCK and never NUL-appended: AmigaDOS
+     * pads with zeros, and for a short target "x\0" and "x" are indistinguishable
+     * here -- which is exactly why a short-target test cannot prove this. */
+    put_be32(b + 0, AFS_T_HEADER);
+    put_be32(b + 4, nb);                       /* header_key: self-pointer */
+    /* +8 high_seq, +12 ht_size, +16 data_size all 0 */
+    memcpy(b + 24, target, targetlen);         /* the path, zero-padded after it */
+    put_be16(b + bs - 196, 0);
+    put_be16(b + bs - 194, 0);
+    put_be32(b + bs - 192, 0);                 /* protect */
+    put_be32(b + bs - 188, 0);                 /* byte_size: a link has no data */
+    b[bs - 184] = 0;                           /* no comment */
+    b[bs - 80] = (uint8_t)namelen;
+    memcpy(b + bs - 79, name, namelen);
+    put_be32(b + bs - 44, 0);                  /* real_entry: not a hard link */
+    put_be32(b + bs - 40, 0);                  /* next_link */
+    put_be32(b + bs - 16, 0);                  /* no hash-chain successor yet */
+    put_be32(b + bs - 12, dirblock);           /* parent */
+    put_be32(b + bs - 8, 0);                   /* no extension */
+    put_be32(b + bs - 4, AFS_ST_SOFTLINK);
+    put_be32(b + 20, afs_block_checksum(b, bs, 20));
+
+    if (afs_volume_write_block(v, nb, b, bs) != 0) {
+        free(b);
+        lk_err(errbuf, errlen, "cannot write soft-link block");
+        return -1;
+    }
+    free(b);
+    if (afs_dir_link_entry(v, dirblock, nb, errbuf, errlen) != 0) return -1;
+
+    /* The dir-cache record. My first version of this function wrote NONE, with
+     * a comment arguing that a size of zero "would teach the cache this name is
+     * an empty file". That comment was REASONING, and the oracle contradicted
+     * it: `adfls` listed every other entry on the volume and none of the soft
+     * links this function created. Ground truth from the fixture settles it --
+     * the root's dir-cache block 881 carries, for the volume's OWN soft link
+     * `slink_dir1`:
+     *
+     *     header=885  size=0  sec_type=3  name=slink_dir1
+     *
+     * size 0 is exactly what a real AmigaDOS writes for a soft link, and the
+     * record is what makes the entry visible to a reader that consults the
+     * cache. The hash table alone is NOT sufficient -- on a DOS\5 volume it is
+     * the cache that an outside implementation walks.
+     *
+     * (This is rule 257 wearing a hat: do not write a constraint from
+     * reasoning about a format. Ask, or read what a real implementation wrote.) */
+    afs_dircache_rec_t rec;
+    memset(&rec, 0, sizeof rec);
+    rec.header = nb;
+    rec.size = 0;
+    rec.sec_type = (uint8_t)AFS_ST_SOFTLINK;
+    memcpy(rec.name, name, namelen < 30 ? namelen : 30);
+    if (afs_dircache_upsert(v, dirblock, &rec, NULL, 0, errbuf, errlen) != 0)
+        return -1;
+
+    *link_out = nb;
+    return 0;
+}

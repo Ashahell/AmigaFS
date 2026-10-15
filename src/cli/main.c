@@ -39,6 +39,7 @@ static int usage(void) {
         "  afs mkdir  <image> <partition/dir>\n"
         "  afs rm     <image> <partition/path>\n"
         "  afs link   <image> <partition/path> <newname>\n"
+        "  afs symlink <image> <partition/path> <target>\n"
         "  afs mv     <image> <partition/src> <partition/dst>\n"
         "On an RDB-partitioned image the first path component names the\n"
         "partition (as in the FUSE mount); `info` alone lists the partitions.\n"
@@ -644,6 +645,44 @@ static int cmd_mkdir(const char *image, const char *path) {
     return 0;
 }
 
+/* afs symlink <image> <link-path> <target> -- a SOFT link at link-path.
+ *
+ * Unlike `afs link`, the target is NOT resolved and need not exist: a soft link
+ * is a stored string, so pointing at something that has not been created yet is
+ * legal and is exactly what a symlink is for. That is also why the two commands
+ * have different shapes -- `link` takes the existing path plus a bare name,
+ * `symlink` takes the path to create plus a free-form target. */
+static int cmd_symlink(const char *image, const char *path, const char *target) {
+    afs_volume_t *v = NULL;
+    uint32_t dirblk = 0;
+    const char *base = NULL;
+    char dirbuf[512], err[256] = {0};
+    uint32_t link = 0;
+
+    if (!target || !*target) {
+        fprintf(stderr, "afs: symlink needs a non-empty target\n");
+        return 2;
+    }
+    if (open_parent_rw(image, path, &v, &dirblk, &base, dirbuf, sizeof dirbuf) != 0)
+        return 1;
+    if (afs_symlink(v, dirblk, base, strlen(base), target, strlen(target),
+                    &link, err, sizeof err) != 0) {
+        fprintf(stderr, "afs: cannot symlink %s: %s\n", path, err);
+        afs_volume_close(v);
+        return 1;
+    }
+    /* Print what a reader will actually see, not what was stored -- the two
+     * differ for an absolute or "Vol:"-prefixed target, and only the translated
+     * form is what the mount resolves. */
+    char resolved[1024];
+    if (afs_softlink_target(v, dirblk, base, strlen(base),
+                            resolved, sizeof resolved) != 0)
+        snprintf(resolved, sizeof resolved, "%s", target);
+    printf("%s -> %s (block %u)\n", base, resolved, link);
+    afs_volume_close(v);
+    return 0;
+}
+
 /* afs link <image> <target-path> <newname> -- a HARD link beside the target. */
 static int cmd_link(const char *image, const char *path, const char *newname) {
     afs_volume_t *v = NULL;
@@ -945,6 +984,10 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "link") == 0) {
         if (argc < 5) { fprintf(stderr, "afs: link needs a path and a new name\n"); return 2; }
         return cmd_link(image, argv[3], argv[4]);
+    }
+    if (strcmp(cmd, "symlink") == 0) {
+        if (argc < 5) { fprintf(stderr, "afs: symlink needs a path and a target\n"); return 2; }
+        return cmd_symlink(image, argv[3], argv[4]);
     }
     if (strcmp(cmd, "mv") == 0) {
         if (argc < 5) { fprintf(stderr, "afs: mv needs source and destination\n"); return 2; }

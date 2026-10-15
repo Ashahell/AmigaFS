@@ -935,6 +935,63 @@ finds the thing — verified by planting an instance in `test_dir.c` and watchin
 versions pass straight over it.
 
 
+## M31 — soft-link creation, and two defects only the outside could see (2026-10-15)
+
+`afs_symlink` (library), `afs symlink` (CLI) and `.symlink` (mount). The last
+missing filesystem operation. The layout came from ground truth, not memory:
+block 885 of `testffs.adf` is a soft link written by a real AmigaDOS and reads
+as `T_HEADER`/`ST_SOFTLINK`, `byte_size` 0, `extension` 0, `parent` = the
+containing directory, and the target as ASCII at **+24, zero-padded and not
+NUL-terminated**. ADFlib's `AdfEntryBlock` agrees on the fields.
+
+**Two defects, and neither was reachable from a unit test.**
+
+1. **The dir-cache record.** The first version wrote none, justified in a
+   comment by reasoning: *"a size of zero would teach the cache this name is an
+   empty file"*. Every other writer — file create, hard link, mkdir — writes
+   one. `adfls` listed 14 of 15 entries on the volume and **none of the soft
+   links**, while our own reader listed all of them: on a DOS\5 volume the cache
+   is what an outside implementation walks, and the hash table alone is not
+   enough. Ground truth settled the reasoning in one read — the volume's **own**
+   soft link sits in cache block 881 as `header=885 size=0 sec_type=3`, i.e.
+   exactly the record I had argued against writing. Fixed; the oracle and the
+   reader now agree at 19/19.
+
+2. **The `.symlink` parameter order.** `fuse_lowlevel.h` declares it
+   `symlink(req, **link**, parent, **name**)` — the reverse of `.link`, and the
+   reverse of the POSIX call's own word order. Both string parameters are
+   `const char *`, so the obvious way compiles clean and produces a
+   **self-consistent** volume: an entry named after the *target*, holding the
+   *link name* as its content. `ln -s tgt firstlink` created an entry called
+   `tgt`, and the next `ln -s` failed with `EEXIST` for a name that did not
+   exist.
+
+**Also fixed:** `tests/oracle/m31_symlink_write.sh` (28 gates, up from 27), and
+the CMake `AMIGAFS_GATES` list, which had drifted from `run_all_gates.sh` and
+was missing **every gate from M23 onward** — so `ctest` reported green over a
+subset of what the audit entry point runs. Both lists now name the same 28, and
+the gate itself asserts that. ctest 43/43.
+
+**Rules M31**
+
+- **M31.1 — Do not write a constraint about a format from reasoning; read what a
+  real implementation wrote.** The cost was one comment, one defect, and one
+  oracle disagreement that a passing test suite would never have caught. The
+  fixture already contained the answer, in the cache block, for one `xxd`.
+- **M31.2 — Two parameters of the same type, in an order that contradicts every
+  sibling and the call that names them, is a silent data swap.** It compiles,
+  it runs, and it produces a well-formed wrong answer. Read the header's own doc
+  comment, not the parameter names you expected.
+- **M31.3 — A self-consistent wrong result is the hardest kind to catch.** Both
+  defects here were internally coherent: the swap produced a valid volume with a
+  valid-looking entry, and the missing record produced a volume our own reader
+  was happy with. Only a *second, independent* reader disagreed. When two
+  implementations of the same spec are available, the one that disagrees is
+  evidence — check which of you is wrong before assuming you are right.
+- **M31.4 — A gate list that drifts from the entry point under-reports.** Two
+  lists naming the same gates is duplication; two lists that *can* disagree
+  silently is a reporting bug. Assert the agreement.
+
 ## M30 — asking the oracle about our own fixtures, for the first time (2026-10-15)
 
 M26, M28 and M29 shared one shape: *a fixture and the code under test agreed with each
@@ -991,6 +1048,7 @@ extract nothing — a state our own reader accepts.
 - **Rule (M26):** re-measure an inherited claim before building on it. The plan's "extension chains are not implemented, needed above ~50 MB" was wrong in both halves — 600 KB files round-trip correctly. The 312 KB wall it appeared behind was a *bitmap* bug, and the error message pointed at neither.
 - **Rule (M28):** a bitmap bit has TWO coordinate spaces. `afs_bitmap_set/test` address an ASSEMBLED map at offset 0; a raw bitmap PAGE carries its own checksum long in bytes 0..3, so map data starts at `+4` (`afs_bitmap_read` assembles from `blk + 4`). Mixing them writes bits into the checksum word and produces a map no reader agrees with -- seen three times now: `verify.c`'s page reader, `test_verify.c`'s `bm_set()`, and the write fuzzer's fixture. When touching bitmap code, name the space in the comment.
 - **Rule (M30):** ask the ORACLE about your own fixtures, not only about downloaded images. Until M30 it had never been pointed at one, and a small hand-built volume is exactly where the subtle offsets live.
+- **Rule (M31):** two things a unit test cannot reach. **(1) Do not write a constraint about a format from reasoning — read what a real implementation wrote.** The dir-cache record was skipped on the argument that `size=0` "would teach the cache this name is an empty file"; the fixture's own soft link sits in cache block 881 as `size=0 sec_type=3`, and `adfls` could not see our links until we wrote one. **(2) Two same-typed parameters in an order that contradicts every sibling and the call that names them swap silently.** `fuse_lowlevel.h`'s `.symlink` is `(req, link, parent, name)` — the reverse of `.link` and of POSIX's own word order — and the swap compiles clean, producing a well-formed volume with an entry named after the *target*. The general form: **a self-consistent wrong result is the hardest kind to catch**, so when two implementations of one spec exist and they disagree, find out which of you is wrong before assuming it is the other.
 - **Rule (M30):** do not write a constraint from reasoning about a tool's limits -- MEASURE it. This record's first draft asserted ADFlib could not open a volume under a floppy and listed the 16-block fixtures as permanently oracle-blind. Untested and wrong: ADFlib infers geometry from the file and reads an 8 KiB volume as `HardFile 8.0 KBytes`. The gap was never size; it was that nobody had asked.
 - **Rule (M30):** assert an oracle's AGREEMENT with a known-good reference, never a literal label. `adfinfo` prints `DOS(FFS)` for real DOS\5 fixtures too, so asserting `DIRCACHE` asserts a string the oracle emits for nothing; `unadf`'s banner is where the distinction actually appears.
 - **Rule (M29):** when a bug kind appears three times, sweep every remaining site mechanically rather than stopping at the third. The fourth was in the base image of the suite that gates the **allocator**, and 164 checks had agreed about map state no reader would see.

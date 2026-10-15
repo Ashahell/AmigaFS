@@ -23,6 +23,7 @@
 #include "amigafs/file.h"
 #include "amigafs/links.h"
 #include "amigafs/hash.h"
+#include "amigafs/verify.h"
 #include "amigafs/volume.h"
 
 #define BS 512
@@ -594,8 +595,257 @@ static void test_nlink_for_block(void) {
     afs_volume_close(v);
 }
 
+/* --- M31: creating a soft link -------------------------------------------
+ *
+ * Layout taken from GROUND TRUTH: block 885 of testffs.adf is a soft link
+ * written by a real AmigaDOS, and reads as
+ *
+ *     primary 0x00000002 (T_HEADER)   secType 3 (ST_SOFTLINK)
+ *     byte_size 0   extension 0   parent = the containing directory
+ *     the target as ASCII at +24, ZERO-PADDED rather than NUL-terminated
+ *     (bytes: 64 69 72 5f 31 then 00 ...)
+ *
+ * The zero-padding is the detail a naive writer gets wrong: writing "dir_1\0"
+ * happens to be identical for a 5-byte target, so a short-target test passes
+ * either way. The padding only shows up when the target is followed by other
+ * data in the same block, or when a reader scans for a terminator that is not
+ * there. So the test below writes the target and then asserts the bytes AFTER
+ * it are zero, and the round trip is checked through the real reader.
+ *
+ * ADFlib agrees on the field: AdfEntryBlock's secType at BSIZE-4, byte_size at
+ * BSIZE-188, parent at BSIZE-12.
+ */
+static void test_create_softlink(void) {
+    synth_t s;
+    synth_init(&s, 0x01);
+    afs_volume_t *v = synth_open(&s);
+    if (!v) { CHECK(0, "volume opens"); return; }
+
+    uint32_t sl = 0;
+    char err[256] = {0};
+    /* a relative multi-component target, the shape that needs translation */
+    static const char tgt[] = "dir1/dir1_1/testfile1.txt";
+    CHECK_EQ_U(afs_symlink(v, ROOT, "s1", 2, tgt, sizeof tgt - 1,
+                           &sl, err, sizeof err), 0,
+               "created a soft link (%s)", err);
+    CHECK(sl != 0, "the link has its own header block");
+
+    uint8_t lb[BS];
+    if (afs_volume_read_block(v, sl, lb, BS) == 0) {
+        CHECK_EQ_U(be32(lb), AFS_T_HEADER, "link primary is T_HEADER");
+        CHECK_EQ_U((uint32_t)(int32_t)be32(lb + BS - 4), 3u,
+                   "link secType is ST_SOFTLINK (3)");
+        CHECK_EQ_U(be32(lb + BS - 188), 0, "a soft link carries byte_size 0");
+        CHECK_EQ_U(be32(lb + BS - 8), 0, "a soft link has no extension block");
+        CHECK_EQ_U(be32(lb + BS - 12), ROOT, "parent is the containing directory");
+        CHECK_EQ_U(lb[BS - 80], 2, "name length byte");
+        CHECK(memcmp(lb + BS - 79, "s1", 2) == 0, "name bytes");
+        CHECK(afs_block_valid(lb, BS, 20), "link block checksum valid");
+
+        /* the target, at +24, ZERO-PADDED and not NUL-terminated */
+        size_t tl = sizeof tgt - 1;
+        CHECK(memcmp(lb + 24, tgt, tl) == 0,
+              "the target sits at +24 as plain ASCII, %zu bytes", tl);
+        int all_zero = 1;
+        for (size_t i = 24 + tl; i < 24 + tl + 16; i++)
+            if (lb[i] != 0) { all_zero = 0; break; }
+        CHECK(all_zero,
+              "what follows the target is ZERO padding, not an unterminated run");
+    } else {
+        CHECK(0, "could not read the link block back");
+    }
+
+    /* and the REAL reader must resolve it -- the round trip, not the bytes */
+    char out[512];
+    CHECK_EQ_U(afs_softlink_target(v, ROOT, "s1", 2, out, sizeof out), 0,
+               "the new link's target is readable");
+    CHECK_EQ_S(out, "dir1/dir1_1/testfile1.txt",
+               "  ...and is the target we wrote");
+
+    /* a link at the ROOT reading back bare, since depth 0 adds no "../" */
+    uint32_t sl2 = 0;
+    CHECK_EQ_U(afs_symlink(v, ROOT, "s2", 2, "target.txt", 10, &sl2,
+                           err, sizeof err), 0,
+               "created a bare relative target");
+    CHECK_EQ_U(afs_softlink_target(v, ROOT, "s2", 2, out, sizeof out), 0,
+               "bare target is readable");
+    CHECK_EQ_S(out, "target.txt", "  ...and passes through unchanged");
+
+    /* an absolute Amiga path keeps its meaning: the volume root */
+    uint32_t sl3 = 0;
+    CHECK_EQ_U(afs_symlink(v, ROOT, "s3", 2, "/dir_1/textfile.txt", 19, &sl3,
+                           err, sizeof err), 0,
+               "created an absolute target");
+    CHECK_EQ_U(afs_softlink_target(v, ROOT, "s3", 2, out, sizeof out), 0,
+               "absolute target is readable");
+    CHECK_EQ_S(out, "dir_1/textfile.txt",
+               "  ...relative to the mount root, as the mount requires");
+
+    /* a "Vol:" prefix names the volume root */
+    uint32_t sl4 = 0;
+    CHECK_EQ_U(afs_symlink(v, ROOT, "s4", 2, "Vol:x/y", 8, &sl4,
+                           err, sizeof err), 0,
+               "created a volume-prefixed target");
+    CHECK_EQ_U(afs_softlink_target(v, ROOT, "s4", 2, out, sizeof out), 0,
+               "volume-prefixed target is readable");
+    CHECK_EQ_S(out, "x/y", "  ...with the prefix stripped");
+
+    afs_volume_close(v);
+}
+
+/* A soft link is not a file: it must not be readable as one, and creating one
+ * over an existing name must be refused. */
+static void test_create_softlink_refusals(void) {
+    synth_t s;
+    synth_init(&s, 0x01);
+    afs_volume_t *v = synth_open(&s);
+    if (!v) { CHECK(0, "volume opens"); return; }
+
+    uint32_t target = 0, dirblk = 0, sl = 0;
+    char err[256];
+    CHECK_EQ_U(afs_file_create(v, ROOT, "orig", 4, &target, err, sizeof err), 0,
+               "created a file target");
+    CHECK_EQ_U(afs_dir_mkdir(v, ROOT, "sub", 3, &dirblk, err, sizeof err), 0,
+               "created a directory");
+
+    err[0] = 0;
+    CHECK(afs_symlink(v, ROOT, "orig", 4, "x", 1, &sl, err, sizeof err) != 0,
+          "refuses a duplicate name");
+    CHECK(err[0] != 0, "  ...and says why: %s", err);
+
+    err[0] = 0;
+    CHECK(afs_symlink(v, ROOT, "sub", 3, "x", 1, &sl, err, sizeof err) != 0,
+          "refuses to overwrite a directory");
+    CHECK(err[0] != 0, "  ...and says why: %s", err);
+
+    err[0] = 0;
+    CHECK(afs_symlink(v, ROOT, "a/b", 3, "x", 1, &sl, err, sizeof err) != 0,
+          "refuses an invalid name");
+    CHECK(err[0] != 0, "  ...and says why: %s", err);
+
+    err[0] = 0;
+    CHECK(afs_symlink(v, ROOT, "e", 1, "", 0, &sl, err, sizeof err) != 0,
+          "refuses an empty target");
+    CHECK(err[0] != 0, "  ...and says why: %s", err);
+
+    err[0] = 0;
+    CHECK(afs_symlink(v, ROOT, "e", 1, "x", (size_t)-1, &sl, err, sizeof err) != 0,
+          "refuses a target longer than the block can hold");
+    CHECK(err[0] != 0, "  ...and says why: %s", err);
+
+    /* nothing above may have created an entry */
+    afs_dirent_t e;
+    CHECK(afs_dir_lookup(v, ROOT, "e", 1, &e) != 0, "no entry left behind");
+
+    afs_volume_close(v);
+
+    /* and the refused calls left the volume structurally sound */
+    {
+        afs_verify_report_t rep[8];
+        int nn = afs_verify_memory(s.img, sizeof s.img, BS, rep, 8);
+        for (int i = 0; i < nn && i < 3; i++)
+            printf("         [%d] %s\n", (int)rep[i].kind, rep[i].detail);
+        CHECK_EQ_U(nn, 0, "the volume still verifies after every refusal");
+    }
+}
+
+/* The zero-padding assertion above is DECORATIVE on a fresh block -- `calloc`
+ * hands out zeros, so writing "target\0" into a zeroed block is byte-identical
+ * to writing "target", and the test cannot tell the two writers apart. I proved
+ * that with two mutants (NUL-append, and skip-the-calloc) which both passed.
+ *
+ * The distinction only exists when the allocator hands back a block that once
+ * held something, and `afs_free_block` clears the bitmap bit WITHOUT clearing
+ * the data. So this test dirties the free pool first -- a file with a payload
+ * is written and deleted -- then allocates a run of soft links, which walks
+ * the allocator through that pool. For every block a link lands on we compare
+ * the bytes NOW against what they were BEFORE the call, and require at least
+ * one of them to have been dirty. Without that last requirement the test is
+ * vacuous: it would pass on a pool that was already clean.
+ *
+ * (The dirty bytes come from the file's DATA blocks, not its header: a file
+ * header has an empty hash-table area, so its +24 region is zero anyway. The
+ * first version of this test assumed otherwise and its precondition failed --
+ * which is the check working.)
+ */
+#define TAIL_LO 24
+#define TAIL_HI 72
+
+static int region_dirty(const uint8_t *img, uint32_t blk) {
+    const uint8_t *b = img + (size_t)blk * BS;
+    for (size_t i = TAIL_LO; i < TAIL_HI; i++) if (b[i] != 0) return 1;
+    return 0;
+}
+
+static void test_create_softlink_into_reused_block(void) {
+    synth_t s;
+    synth_init(&s, 0x01);
+    afs_volume_t *v = synth_open(&s);
+    if (!v) { CHECK(0, "volume opens"); return; }
+    char err[256];
+
+    /* Dirty the pool: a payload big enough to occupy many data blocks. */
+    static const char filler[] =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE";
+    uint32_t fblk = 0;
+    CHECK_EQ_U(afs_file_create(v, ROOT, "doomed_file", 11, &fblk,
+                               err, sizeof err), 0,
+               "created a file to dirty the free pool (%s)", err);
+    CHECK_EQ_U(afs_file_write_all(v, fblk, filler, sizeof filler - 1,
+                                  err, sizeof err), 0, "filled it (%s)", err);
+    CHECK_EQ_U(afs_file_delete(v, ROOT, "doomed_file", 11, err, sizeof err), 0,
+               "deleted it, returning its blocks (%s)", err);
+
+    /* Snapshot which blocks carry bytes in the link's target region. */
+    uint8_t before[sizeof s.img];
+    memcpy(before, s.img, sizeof s.img);
+    uint32_t nblk = (uint32_t)(sizeof s.img / BS);
+    int dirty_before = 0;
+    for (uint32_t i = 2; i < nblk; i++)
+        if (region_dirty(before, i)) dirty_before++;
+    CHECK(dirty_before > 0,
+          "the free pool now holds %d block(s) with stale bytes (precondition)",
+          dirty_before);
+
+    /* Allocate a run of links so the allocator walks through that pool. */
+    int reused_one = 0, links = 0;
+    for (int i = 0; i < 24; i++) {
+        char name[16];
+        int n = snprintf(name, sizeof name, "l%d", i);
+        uint32_t sl = 0;
+        if (afs_symlink(v, ROOT, name, (size_t)n, "t", 1, &sl,
+                        err, sizeof err) != 0) break;
+        links++;
+
+        int was_dirty = region_dirty(before, sl);
+        if (was_dirty) reused_one = 1;
+
+        uint8_t lb[BS];
+        if (afs_volume_read_block(v, sl, lb, BS) != 0) { CHECK(0, "read back"); break; }
+        int clean = 1;
+        for (size_t k = TAIL_LO + 1; k < TAIL_HI; k++)
+            if (lb[k] != 0) { clean = 0; break; }
+        if (!clean)
+            CHECK(0, "block %u reused from a dirty block was not cleared "
+                     "(byte +%zu = 0x%02x)", sl, (size_t)TAIL_LO + 1,
+                     lb[TAIL_LO + 1]);
+        if (!afs_block_valid(lb, BS, 20))
+            CHECK(0, "block %u checksum invalid after clearing", sl);
+    }
+    CHECK(links > 0, "created %d soft link(s) into the dirty pool", links);
+    CHECK(reused_one,
+          "at least one link landed on a block that HAD stale bytes");
+}
+
 int main(void) {
     printf("links\n");
+    test_create_softlink();
+    test_create_softlink_into_reused_block();
+    test_create_softlink_refusals();
     test_nlink_for_block();
     test_create_hard_link();
     test_create_two_links_chain();
