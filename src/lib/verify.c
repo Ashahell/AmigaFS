@@ -144,6 +144,106 @@ static void visit_entry(afs_volume_t *v, uint32_t block, visit_ctx_t *vc,
     free(b);
 }
 
+/* --- dir-cache chains (M22) ---------------------------------------------
+ *
+ * AFS_PROBLEM_DIRCACHE and AFS_PROBLEM_CHAIN were declared in verify.h from
+ * the start and never emitted by anything: the dir-cache chain was simply
+ * never verified. `afs verify` answered "OK, no structural problems found"
+ * on a volume whose cache chain was a cycle, which is exactly why M21's
+ * wrong-offset reader reached a release — verify's OK was vacuous here.
+ *
+ * Layout is ADFlib's AdfDirCacheBlock (adf_blk.h:353):
+ *   +0 type=33  +4 headerKey(self)  +8 parent  +12 recordsNb
+ *   +16 nextDirC  +20 checksum  +24 records
+ *
+ * The chain link is +16. +4 is headerKey, which is a SELF-POINTER, and
+ * following it walks every cache block to itself. ADFlib's adfGetDirEntCache
+ * has no cycle guard at all and would hang on such an image; the visited set
+ * here turns that into a reported problem.
+ *
+ * GATED TWICE, and both gates are load-bearing. The volume must have a dir
+ * cache (has_dircache), AND the block must be a ROOT or DIR. A FILE header's
+ * bs-8 is its EXTENSION pointer, and walking that as a cache chain reports
+ * nonsense -- which it did: the first implementation gated only on the volume
+ * and reported "block 959 is not a dir-cache block" on the perfectly good
+ * testffs.adf and testhd.adf, whose 886/1772 are ordinary files. The unit
+ * tests did not catch it because the synthetic negative turned the whole
+ * VOLUME non-DIRC, which masked the missing per-block gate; only the sweep
+ * over the real fixtures exposed it. */
+static void verify_dircache(afs_volume_t *v, uint32_t dirblk,
+                            uint8_t *seen, afs_verify_report_t *rep,
+                            int *n, int max) {
+    size_t bs = afs_volume_block_size(v);
+    uint32_t nblocks = afs_volume_block_count(v);
+    uint8_t *b = malloc(bs);
+    if (!b) return;
+    if (afs_volume_read_block(v, dirblk, b, bs) != 0) { free(b); return; }
+
+    /* Per-block gate: only a directory owns a dir-cache chain. */
+    afs_block_kind_t dk = afs_block_kind(b, bs);
+    if (dk != AFS_BLOCK_ROOT && dk != AFS_BLOCK_DIR) { free(b); return; }
+
+    uint32_t cb = be32(b + bs - 8);
+    while (cb != 0) {
+        if (cb >= nblocks) {
+            add_problem(rep, n, max, AFS_PROBLEM_CHAIN, cb,
+                        "directory %u: dir-cache chain points outside the "
+                        "volume (block %u)", dirblk, cb);
+            break;
+        }
+        if (seen[cb]) {
+            add_problem(rep, n, max, AFS_PROBLEM_CHAIN, cb,
+                        "directory %u: dir-cache chain revisits block %u",
+                        dirblk, cb);
+            break;
+        }
+        seen[cb] = 1;
+        if (afs_volume_read_block(v, cb, b, bs) != 0) {
+            add_problem(rep, n, max, AFS_PROBLEM_CHAIN, cb,
+                        "directory %u: cannot read dir-cache block %u",
+                        dirblk, cb);
+            break;
+        }
+        if (afs_block_kind(b, bs) != AFS_BLOCK_DIRCACHE) {
+            add_problem(rep, n, max, AFS_PROBLEM_CHAIN, cb,
+                        "directory %u: dir-cache chain reaches block %u, "
+                        "which is not a dir-cache block", dirblk, cb);
+            break;
+        }
+        if (!afs_block_valid(b, bs, 20)) {
+            add_problem(rep, n, max, AFS_PROBLEM_CHECKSUM, cb,
+                        "dir-cache block %u checksum invalid", cb);
+        }
+        if (be32(b + 4) != cb) {
+            add_problem(rep, n, max, AFS_PROBLEM_DIRCACHE, cb,
+                        "dir-cache block %u: headerKey %u is not the block's "
+                        "own number", cb, be32(b + 4));
+        }
+        if (be32(b + 8) != dirblk) {
+            add_problem(rep, n, max, AFS_PROBLEM_DIRCACHE, cb,
+                        "dir-cache block %u: parent %u is not the directory "
+                        "%u that owns the chain", cb, be32(b + 8), dirblk);
+        }
+        cb = be32(b + 16);                 /* nextDirC -- NOT +4 */
+    }
+    free(b);
+}
+
+/* Walk the tree collecting every directory (the rootblock included), then
+ * verify each one's cache chain. Separate from the entry walk because the
+ * chain check is gated on a volume-wide property, not on any one entry. */
+static void verify_all_dircaches(afs_volume_t *v, uint8_t *marks,
+                                 afs_verify_report_t *rep, int *n, int max) {
+    if (!afs_volume_has_dircache(v)) return;
+    uint32_t nblocks = afs_volume_block_count(v);
+    uint8_t *seen = calloc(nblocks, 1);
+    if (!seen) return;
+    for (uint32_t b = 0; b < nblocks && *n < max; b++) {
+        if (marks[b]) verify_dircache(v, b, seen, rep, n, max);
+    }
+    free(seen);
+}
+
 int afs_verify_memory_ex(const uint8_t *img, size_t size, size_t bsize,
                          afs_verify_report_t *out, int max, unsigned flags) {
     if (!img || !out || max <= 0) return 0;
@@ -171,6 +271,10 @@ int afs_verify_memory_ex(const uint8_t *img, size_t size, size_t bsize,
      * verify its entries here */
     uint32_t root = afs_volume_rootblock(v);
     visit_entry(v, root, &vc, 0, out, &n, max);
+
+    /* Dir-cache chains. `vc.marks` holds every block the tree reached, so the
+     * directory blocks among them are exactly the ones owning a cache chain. */
+    verify_all_dircaches(v, vc.marks, out, &n, max);
 
     /* Cross-check the bootblock's root field. Many images leave it 0 (the
      * computed value is authoritative); a NON-ZERO value that disagrees with

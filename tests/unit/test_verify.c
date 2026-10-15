@@ -466,6 +466,177 @@ static void test_verify_accepts_correct_bitmap_page_count(void) {
     CHECK(!saw_count, "one bitmap page for a 1760-block volume is correct");
 }
 
+/* --- dir-cache chain checks ------------------------------------------------
+ *
+ * AFS_PROBLEM_DIRCACHE and AFS_PROBLEM_CHAIN have been declared in verify.h
+ * since the header was written and NOTHING EVER EMITTED THEM. The dir-cache
+ * chain was therefore never verified: `afs verify` reported "OK, no structural
+ * problems found" on a volume whose cache chain was corrupt. That is how M21's
+ * reader bug reached a release -- verify's OK was vacuous on that axis.
+ *
+ * Layout is ADFlib's AdfDirCacheBlock (adf_blk.h:353):
+ *   +0 type=33  +4 headerKey(self)  +8 parent  +12 recordsNb
+ *   +16 nextDirC  +20 checksum  +24 records
+ * nextDirC is at +16. +4 is headerKey, a SELF-POINTER -- reading it as the
+ * chain link walks the block to itself, which is the bug these tests pin.
+ *
+ * Only DOS\5 volumes are examined: on any other variant the directory block's
+ * bs-8 field is a file EXTENSION pointer, not a cache pointer, and walking it
+ * as a chain reports nonsense.
+ */
+#define DIRC_ROOT 8
+#define DIRC_BM   9
+#define DIRC_CACHE 10
+
+/* Build a DOS\5 volume whose rootblock owns one dir-cache block. `next` is
+ * written to the cache block's +16; `parent` to +8. */
+static void build_dirc(uint8_t *img, uint32_t next, uint32_t parent) {
+    memset(img, 0, 16 * BS);
+    put_be32(img, ((uint32_t)'D' << 24) | ((uint32_t)'O' << 16) |
+                  ((uint32_t)'S' << 8) | 0x05);          /* DOS\5 = DIRC */
+
+    uint8_t *r = img + DIRC_ROOT * BS;
+    put_be32(r, AFS_T_HEADER);
+    put_be32(r + 12, (uint32_t)afs_hash_table_size(BS));
+    put_be32(r + BS - 200, 0xFFFFFFFFu);
+    put_be32(r + BS - 196, DIRC_BM);
+    put_be32(r + BS - 8, DIRC_CACHE);                    /* first cache block */
+    r[BS - 80] = 3; memcpy(r + BS - 79, "vol", 3);
+    put_be32(r + BS - 4, AFS_ST_ROOT);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    uint8_t *bm = img + DIRC_BM * BS;
+    memset(bm, 0, BS);
+    for (uint32_t b = 12u; b < 16u; b++) bm_set(bm, b);
+    bm_get(bm, DIRC_BM) || (bm[0] = 0);
+    put_be32(bm, afs_block_checksum(bm, BS, 0));
+
+    uint8_t *cb = img + DIRC_CACHE * BS;
+    memset(cb, 0, BS);
+    put_be32(cb + 0, 33);                 /* T_DIRC */
+    put_be32(cb + 4, DIRC_CACHE);         /* headerKey: self-pointer */
+    put_be32(cb + 8, parent);             /* parent directory */
+    put_be32(cb + 12, 0);                 /* recordsNb */
+    put_be32(cb + 16, next);              /* nextDirC */
+    put_be32(cb + 20, afs_block_checksum(cb, BS, 20));
+}
+
+static int count_kind(afs_verify_report_t *rep, int n, afs_problem_kind_t k) {
+    int c = 0;
+    for (int i = 0; i < n; i++) if (rep[i].kind == k) c++;
+    return c;
+}
+
+static void test_verify_accepts_a_clean_dircache(void) {
+    uint8_t img[16 * BS];
+    build_dirc(img, 0, DIRC_ROOT);
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    CHECK_EQ_U(count_kind(rep, n, AFS_PROBLEM_CHAIN), 0,
+               "a terminating cache chain reports no CHAIN problem");
+    CHECK_EQ_U(count_kind(rep, n, AFS_PROBLEM_DIRCACHE), 0,
+               "a self-consistent cache block reports no DIRCACHE problem");
+}
+
+static void test_verify_flags_a_self_referential_cache_chain(void) {
+    uint8_t img[16 * BS];
+    build_dirc(img, DIRC_CACHE, DIRC_ROOT);      /* nextDirC points at ITSELF */
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    CHECK_EQ_U(count_kind(rep, n, AFS_PROBLEM_CHAIN), 1,
+               "a self-referential cache chain is reported once");
+}
+
+static void test_verify_flags_a_cache_block_of_the_wrong_type(void) {
+    uint8_t img[16 * BS];
+    build_dirc(img, 0, DIRC_ROOT);
+    uint8_t *cb = img + DIRC_CACHE * BS;
+    put_be32(cb, 2);                            /* T_HEADER, not T_DIRC */
+    put_be32(cb + 20, afs_block_checksum(cb, BS, 20));
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    CHECK(count_kind(rep, n, AFS_PROBLEM_CHAIN) >= 1,
+          "a cache chain through a non-cache block is reported");
+}
+
+static void test_verify_flags_a_cache_with_the_wrong_parent(void) {
+    uint8_t img[16 * BS];
+    build_dirc(img, 0, 999);                     /* parent is not the owner */
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    CHECK(count_kind(rep, n, AFS_PROBLEM_DIRCACHE) >= 1,
+          "a cache block naming the wrong parent directory is reported");
+}
+
+static void test_verify_flags_a_cache_with_a_wrong_headerkey(void) {
+    uint8_t img[16 * BS];
+    build_dirc(img, 0, DIRC_ROOT);
+    uint8_t *cb = img + DIRC_CACHE * BS;
+    put_be32(cb + 4, 77);                       /* headerKey != itself */
+    put_be32(cb + 20, afs_block_checksum(cb, BS, 20));
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    CHECK(count_kind(rep, n, AFS_PROBLEM_DIRCACHE) >= 1,
+          "a cache block whose headerKey is not itself is reported");
+}
+
+static void test_verify_ignores_dircache_on_non_dirc_volumes(void) {
+    /* On DOS\1 the rootblock's bs-8 is a file EXTENSION pointer. Walking it as
+     * a cache chain would report nonsense on 6 of the 8 real non-DIRC
+     * fixtures, which is why the check is gated on has_dircache. */
+    uint8_t img[16 * BS];
+    build_dirc(img, DIRC_CACHE, DIRC_ROOT);
+    put_be32(img, ((uint32_t)'D' << 24) | ((uint32_t)'O' << 16) |
+                  ((uint32_t)'S' << 8) | 0x01);   /* DOS\1: no dir cache */
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    CHECK_EQ_U(count_kind(rep, n, AFS_PROBLEM_CHAIN), 0,
+               "a non-DIRC volume's bs-8 is not walked as a cache chain");
+    CHECK_EQ_U(count_kind(rep, n, AFS_PROBLEM_DIRCACHE), 0,
+               "a non-DIRC volume reports no dir-cache problems");
+}
+
+/* A DIRC volume still has FILE headers, and a file's bs-8 is its EXTENSION
+ * pointer. Walking that as a cache chain reported "block 959 is not a
+ * dir-cache block" on the good fixtures testffs.adf / testhd.adf, whose blocks
+ * 886/1772 are ordinary files. The volume-level gate above cannot catch this:
+ * the volume genuinely does have a dir cache. Only a per-block gate can. */
+static void test_verify_ignores_dircache_on_files_of_a_dirc_volume(void) {
+    /* A DIRC volume still has FILE headers, and a file's bs-8 is its EXTENSION
+     * pointer. Walking that as a cache chain reported "block 959 is not a
+     * dir-cache block" on the good fixtures testffs.adf / testhd.adf, whose
+     * blocks 886/1772 are ordinary FILES. The volume-level gate cannot catch
+     * this -- the volume genuinely does have a dir cache -- so the FILE must be
+     * reachable from the tree, which is what leaves the per-block gate as the
+     * only thing that can. */
+    uint8_t img[16 * BS];
+    build_dirc(img, 0, DIRC_ROOT);                 /* clean, terminating chain */
+
+    uint8_t *f = img + 11 * BS;
+    memset(f, 0, BS);
+    put_be32(f, AFS_T_HEADER);
+    put_be32(f + 12, (uint32_t)afs_hash_table_size(BS));
+    put_be32(f + BS - 16, 0);
+    put_be32(f + BS - 12, DIRC_ROOT);              /* parent: the rootblock */
+    put_be32(f + BS - 8, 14);                      /* EXTENSION pointer */
+    put_be32(f + BS - 4, AFS_ST_FILE);
+    f[BS - 80] = 4; memcpy(f + BS - 79, "file", 4);
+    put_be32(f + 20, afs_block_checksum(f, BS, 20));
+
+    /* file it into the rootblock's hash table so the walk actually reaches it */
+    uint8_t *r = img + DIRC_ROOT * BS;
+    uint32_t tsz = (uint32_t)afs_hash_table_size(BS);
+    put_be32(r + 24 + 4 * afs_hash("file", 4, tsz, 0x01), 11);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    afs_verify_report_t rep[64];
+    int n = afs_verify_memory(img, sizeof img, BS, rep, 64);
+    CHECK_EQ_U(count_kind(rep, n, AFS_PROBLEM_CHAIN), 0,
+               "a reachable file's bs-8 is not walked as a cache chain");
+    CHECK_EQ_U(count_kind(rep, n, AFS_PROBLEM_DIRCACHE), 0,
+               "a file header on a DIRC volume reports no dir-cache problems");
+}
+
 int main(void) {
     printf("bitmap / verify\n");
     test_bitmap_block_checksum_rule();
@@ -480,5 +651,12 @@ int main(void) {
     test_verify_reports_unknown_block_type();
     test_verify_reports_bitmap_page_used_as_a_file();
     test_verify_accepts_correct_bitmap_page_count();
+    test_verify_accepts_a_clean_dircache();
+    test_verify_flags_a_self_referential_cache_chain();
+    test_verify_flags_a_cache_block_of_the_wrong_type();
+    test_verify_flags_a_cache_with_the_wrong_parent();
+    test_verify_flags_a_cache_with_a_wrong_headerkey();
+    test_verify_ignores_dircache_on_non_dirc_volumes();
+    test_verify_ignores_dircache_on_files_of_a_dirc_volume();
     TEST_REPORT();
 }
