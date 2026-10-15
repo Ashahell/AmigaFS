@@ -195,9 +195,13 @@ example, and the two traps worth knowing about.
   It is never run automatically on open — the refusal above stays exactly as it
   was. `--dry-run` rebuilds a **copy** and reports what would be reclaimed, so
   the original is never opened for writing.
-  One behaviour is matched deliberately rather than "fixed": a link's own block
-  is marked, but a **soft link's target is not**, so a dangling soft link loses
-  its target on a rebuild. ADFlib does the same.
+  One behaviour is worth stating precisely: a link's own block is marked, but
+  a **soft link's target is not followed** — and that is correct, not a
+  limitation. A soft link's block holds the target's *path*, which dos.library
+  resolves at access time, so the link owns nothing but its own block. The
+  target is owned by its own directory entry and marked when the walk reaches
+  it. The only case where this shows is a *dangling* soft link, where there is
+  nothing to lose because the target does not exist. ADFlib does the same.
 - A stale map is ordinary on a real Amiga disk: `afs verify --strict` flags
   **10 of the 11 fixtures**, and only `testhd.adf` is clean. That is a count of
   fixtures *flagged*, not of fixtures with a stale map — `cache_crash.adf` is

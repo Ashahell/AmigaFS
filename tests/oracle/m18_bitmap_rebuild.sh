@@ -180,6 +180,53 @@ else
     ok "DOS\\6 long-name volume refused by name"
 fi
 
+# ------------------------------------------ 8. a DIRC volume must rebuild --
+# testffs.adf is DOS\5 (DIRC): its directories carry dir-cache chains, and the
+# rebuild walks them so the cache blocks are not freed.
+#
+# This check exists because the first implementation read the chain link from
+# offset +4. That offset is `headerKey`, which in AmigaDOS is a SELF-POINTER to
+# the block's own number -- not the link. Following it walks the block to
+# itself, the loop guard trips, and a perfectly valid volume is refused with
+# "corrupt dircache chain". ADFlib's AdfDirCacheBlock (adf_blk.h:353) puts
+# nextDirC at +16.
+#
+# Always a COPY: the fixtures are sha256-pinned by fixtures.lock and must not
+# be written in place.
+DIRC="$FX/testffs.adf"
+if [ -f "$DIRC" ]; then
+    cp "$DIRC" "$WORK/dirc.adf"
+    rm -rf "$WORK/dbefore" "$WORK/dafter"
+    extract "$DIRC" "$WORK/dbefore"
+    n_dbefore=$(find "$WORK/dbefore" -type f ! -name '*.info' | wc -l)
+    out=$(  "$AFS" bitmap-rebuild "$WORK/dirc.adf" --yes 2>&1 ); rc_d=$?
+    if [ "$rc_d" -eq 0 ]; then
+        ok "DOS\\5 DIRC volume rebuilds ($(printf '%s' "$out" | sed -n 's/.* \([0-9]*\) reclaimed$/\1/p') blocks reclaimed)"
+    else
+        bad "DOS\\5 DIRC volume refused a rebuild: $out"
+    fi
+    extract "$WORK/dirc.adf" "$WORK/dafter"
+    n_dafter=$(find "$WORK/dafter" -type f ! -name '*.info' | wc -l)
+    if [ "$n_dafter" -eq "$n_dbefore" ] && [ "$n_dbefore" -gt 0 ]; then
+        ok "DIRC files survive the rebuild ($n_dafter files)"
+    else
+        bad "DIRC file count changed: $n_dbefore -> $n_dafter"
+    fi
+    if diff -r --exclude='*.info' "$WORK/dbefore" "$WORK/dafter" >/dev/null 2>&1; then
+        ok "DIRC file bytes are unchanged across the rebuild"
+    else
+        bad "DIRC file bytes changed across the rebuild"
+    fi
+    if "$AFS" verify "$WORK/dirc.adf" --strict 2>&1 | grep -q "bitmap"; then
+        bad "DIRC volume still reports a bitmap disagreement after rebuild"
+    else
+        ok "DIRC volume's bitmap disagreement is resolved"
+    fi
+    # The fixture itself must be untouched -- the rebuild ran on a copy.
+    cp "$DIRC" "$WORK/dirc.probe"
+    if cmp -s "$WORK/dirc.probe" "$DIRC"; then ok "the fixture was not modified"; else bad "THE FIXTURE WAS MODIFIED"; fi
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then
     echo "m18_bitmap_rebuild: PASS"

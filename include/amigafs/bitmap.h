@@ -53,8 +53,16 @@ size_t afs_bitmap_pages_required(uint32_t nblocks, size_t bsize);
  * (lines 572-578).
  *
  * Deliberately matched to AmigaDOS, not "improved on": a link's own block is
- * marked, but a SOFT LINK'S TARGET IS NOT. A dangling soft link therefore loses
- * its target on a rebuild. ADFlib does the same; divergence would be a bug.
+ * marked, but a SOFT LINK'S TARGET IS NOT followed. That is not a limitation,
+ * it is correct. A soft link's block is a T_HEADER whose data area holds the
+ * target's PATH (the .ADF format FAQ, section 4.6.2); dos.library resolves it
+ * at access time. The link therefore owns nothing but its own block, and the
+ * target is owned by its own directory entry — which this walk visits
+ * independently and marks in its own right. Following the link target would
+ * mark blocks the tree does not actually reach. The only case where the
+ * difference shows is a DANGLING soft link, and then there is nothing to lose
+ * because the target does not exist. ADFlib behaves identically; divergence
+ * would be a bug.
  *
  * `stats` may be NULL. Returns 0 on success; on any failure NOTHING is
  * written -- the whole walk completes into a marks array before the first

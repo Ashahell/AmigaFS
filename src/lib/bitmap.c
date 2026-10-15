@@ -194,8 +194,21 @@ static int rb_mark_file(rb_ctx_t *c, uint32_t hdrblk) {
 }
 
 /* Mark a directory's dircache chain. The dir block's bs-8 field points at the
- * first cache block; each cache block's nextDirC lives at +4. ADFlib marks the
- * same chain (adf_bitm.c:989). */
+ * first cache block, and each cache block's nextDirC lives at +16. ADFlib's
+ * AdfDirCacheBlock (adf_blk.h:353) is the authority:
+ *
+ *   +0  type=33   +4  headerKey   +8  parent   +12 recordsNb
+ *   +16 nextDirC  +20 checkSum    +24 records
+ *
+ * The offset is +16 and NOT +4. +4 is headerKey, which in AmigaDOS is a
+ * SELF-POINTER to the block's own number; reading it as the chain link walks
+ * every cache block to itself forever, and a valid DOS\5 volume is refused
+ * with "corrupt dircache chain". That is exactly what happened the first
+ * time: testffs.adf, a healthy DIRC fixture, was rejected by our own reader.
+ *
+ * Our WRITER was always right — dir.c stamps headerKey at +4 and leaves
+ * nextDirC at +16 zeroed for a single-block chain. Only this reader was wrong.
+ */
 static int rb_mark_dircache(rb_ctx_t *c, uint32_t dirblk) {
     size_t bs = c->bsize;
     uint8_t *b = malloc(bs);
@@ -220,7 +233,7 @@ static int rb_mark_dircache(rb_ctx_t *c, uint32_t dirblk) {
             rb_err(c->errbuf, c->errlen, "cannot read dircache block %u", cb);
             return -1;
         }
-        cb = be32(b + 4);                            /* nextDirC */
+        cb = be32(b + 16);                           /* nextDirC */
     }
     free(b);
     return 0;
