@@ -935,6 +935,53 @@ finds the thing — verified by planting an instance in `test_dir.c` and watchin
 versions pass straight over it.
 
 
+## M30 — asking the oracle about our own fixtures, for the first time (2026-10-15)
+
+M26, M28 and M29 shared one shape: *a fixture and the code under test agreed with each
+other, so every check agreed and the suite reported green while measuring nothing.* Each
+was fixed by asking something from outside — a fresh rescan, `verify --strict`, a mutant.
+
+The strongest outside question available is the **oracle**. It had never been asked about
+the synthetic fixtures at all.
+
+**The finding.** ADFlib cannot open a volume smaller than a floppy — 1760 blocks, 880 KiB.
+Every small fixture in the unit suite is **16 blocks**: `test_verify.c`'s whole DIRC root,
+`test_bitmap_rebuild.c`'s entire volume. So **no oracle had ever validated any of them.**
+They were checked exclusively by our own reader, which is exactly the reader that shares
+the assumptions in question.
+
+**What the oracle says about the fixtures it CAN reach.** A DOS\5 DIRC floppy built the
+way `test_verify.c` builds one, then given real content through the public API:
+
+| question | ADFlib |
+|---|---|
+| does it list our file? | `F hello.txt` |
+| does it agree on the size? | 16 bytes |
+| does it extract the same bytes? | sha256 `49a06ede0ec5b0dd` — identical |
+| does it recognise the volume? | `DOS(FFS) "vol"` |
+
+Agreement, not merely acceptance — which is the only kind that survives a shared mistake,
+because ADFlib shares none of our offsets or coordinate-space conventions.
+
+**One assertion I had to correct rather than make pass.** I asserted `adfinfo` would print
+`DIRCACHE`. It prints `DOS(FFS)` — *for `testffs.adf` and `win32-names.adf` too*, both
+genuinely DOS\5. ADFlib does not distinguish DIRC from plain FFS in that output, so
+asserting the literal string would have been asserting a label the oracle never emits, for
+any fixture. The check now asserts **agreement with a real DOS\5 fixture's label**, which
+is the question that can actually be wrong. This is the same class of gap already recorded
+for ADFlib's filesystem-type string.
+
+**Gate: `m30_fixtures_valid_to_the_oracle.sh` (27th).** Builds the DIRC fixture, gives it
+content, and requires ADFlib to agree on name, size and bytes. Load-bearing proven:
+corrupting the header's checksum so the entry becomes unreachable makes `adfls` list
+nothing and `unadf` extract nothing, and the gate fails — a state our own reader would
+have accepted.
+
+**The oracle-blind fixtures are named in its output, not skipped silently.** A fixture too
+small for the oracle is a fixture no oracle has checked, and that belongs in the log rather
+than in a gap nobody notices. Growing them to a full floppy is the obvious follow-up.
+
+
 ## 5. Testing strategy
 
 - **Oracle 1:** ADFlib CLI at pinned commit `73880de7` (`adfls`, `adfinfo`, `unadf`, `adfbitmap`). Reference for listings, metadata, content and bitmap. **Compare listings and content only** — its filesystem-type *string* is `???` for `DOS\2`/`DOS\4` because `adfVolIsFsValid()` is a label/overwrite guard (`src/adf_dev.c:529`, `examples/adfformat.c:134`), not a mount rule. Record that display gap in the oracle script.
@@ -945,6 +992,8 @@ versions pass straight over it.
 - **Rule (M24):** an oracle's *silence* is not agreement, and its stderr is not a damage signal. Before trusting an oracle to refute a change, measure what it does on the **pristine fixture** — `unadf` emits `No such file or directory` for links and some ordinary entries alike, resolves links to their targets, and exits 0 (see M24). An oracle that skips a construct silently looks like evidence of breakage; pin that limit in a gate (`m24_unadf_link_blindness.sh`) rather than rediscovering it.
 - **Rule (M26):** re-measure an inherited claim before building on it. The plan's "extension chains are not implemented, needed above ~50 MB" was wrong in both halves — 600 KB files round-trip correctly. The 312 KB wall it appeared behind was a *bitmap* bug, and the error message pointed at neither.
 - **Rule (M28):** a bitmap bit has TWO coordinate spaces. `afs_bitmap_set/test` address an ASSEMBLED map at offset 0; a raw bitmap PAGE carries its own checksum long in bytes 0..3, so map data starts at `+4` (`afs_bitmap_read` assembles from `blk + 4`). Mixing them writes bits into the checksum word and produces a map no reader agrees with -- seen three times now: `verify.c`'s page reader, `test_verify.c`'s `bm_set()`, and the write fuzzer's fixture. When touching bitmap code, name the space in the comment.
+- **Rule (M30):** ask the ORACLE about your own fixtures, not only about downloaded images. ADFlib cannot open a volume under one floppy (1760 blocks), and every small unit fixture is 16 blocks -- so until M30 none of them had ever been validated by anything but our own reader, which is the reader that shares the assumptions under suspicion. Name the oracle-blind fixtures in the gate output rather than skipping them quietly.
+- **Rule (M30):** assert an oracle's AGREEMENT with a known-good reference, never a literal label. `adfinfo` prints `DOS(FFS)` for real DOS\5 fixtures too, so asserting `DIRCACHE` asserts a string the oracle emits for nothing.
 - **Rule (M29):** when a bug kind appears three times, sweep every remaining site mechanically rather than stopping at the third. The fourth was in the base image of the suite that gates the **allocator**, and 164 checks had agreed about map state no reader would see.
 - **Rule (M29):** a fixture and the code under test that share a *mistake* produce a self-consistently meaningless suite. The allocator read the same wrong offset the fixture wrote, so every check agreed and all were green. When a test's own comment says "the first version got this wrong", read the comment before editing the code — the knowledge is usually already in the file.
 - **Rule (M29):** a static scan is code and needs the same mutation testing as a test. Three versions of this gate's scan passed straight over a planted instance; the fourth catches it. Prefer the least elegant match that actually finds the thing.
