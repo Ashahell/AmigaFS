@@ -878,6 +878,63 @@ correct either way, so running it proves nothing about *which* check it calls.
 B (page offset 0) each turn a specific named check red; good code passes both.
 
 
+## M29 — the fourth instance of the bitmap coordinate-space bug, in the suite that gates the allocator (2026-10-15)
+
+M28 named the bug kind — *a bitmap bit addressed in the wrong coordinate space* — after
+finding three instances. So the next step was mechanical: sweep every remaining site.
+
+**Found in `tests/unit/test_alloc.c`, at `build_writable_img()`.** That function is the
+base image for **every** allocation test in the file. It called `afs_bitmap_set()` — which
+addresses an assembled map at offset 0 — on a raw page whose map data starts at `+4`.
+
+Measured before fixing: `verify --strict` reports **2 problems** on that volume —
+
+```
+block 880 is referenced by the tree but the bitmap marks it free   (the rootblock)
+block 881 is referenced by the tree but the bitmap marks it free   (the bitmap page)
+```
+
+— and blocks 0, 1, 880, 881, the four the function's own comment says are "marked used",
+all read **free**. Blocks 0..31 were living inside the page's own checksum long and every
+later block sat four bytes early.
+
+**Why 164 checks never noticed.** The allocator reads the *same* wrong region, so
+allocation succeeded and every test in the file agreed with every other about map state
+that no reader would ever see. The suite was self-consistently meaningless and reported
+green. That is the recurring shape of this whole bug class, and it is why **running the
+suite proves nothing** — only asking the invariant does.
+
+**The same file already knew.** `build_writable_img_free()`, fifteen lines below, carries
+a nine-line comment describing this exact gotcha — *"the first version of this test got it
+wrong and 'proved' a volume full of free blocks was full"* — and gets it right, building
+the map separately and copying it in at `+4`. The knowledge existed in the file and had
+simply not reached the function above it.
+
+**Fixed by applying that sibling's own correction**, and by adding
+`test_the_base_volume_has_a_readable_map`, which asserts what every other test here
+assumes: strict verification reports zero problems, and blocks {0, 1, 880, 881} read used
+while {2, 100, last} read free. RED showed all five wrong; GREEN is 171/171.
+
+**Swept clean after the fix.** Every remaining site uses `+4`: `test_bitmap_rebuild.c`,
+`test_verify.c`, `test_links.c`, `write_fuzz.c`, `test_alloc.c`'s other helper. The shell
+gates never hand-craft a page at all — they drive `afs bitmap-rebuild`, which is the
+library's own path.
+
+**Gate: `m29_no_raw_page_bitmap_writes.sh` (26th).** A static scan for the idiom
+`<name> = img + <block> * 512;` followed by `afs_bitmap_set(<name>, …)`, plus a
+behavioural half that builds both the correct and the historic-raw form and requires the
+latter to be **detected** — so the gate proves its own detector works.
+
+**That scan took three attempts, and each failure was informative.** Version one matched
+the token `afs_bitmap_set(bm` per file and excused any file declaring a `map` buffer —
+over- and under-matching at once. Version two anchored a regex at the assignment, which
+cannot cross the pointer star in `uint8_t *bm = …`. Version three tried to place the star
+before the name, which it is not. The working form matches the name as a **substring**
+with awk's `index()`. It is less elegant than what it replaced and it is the only one that
+finds the thing — verified by planting an instance in `test_dir.c` and watching two earlier
+versions pass straight over it.
+
+
 ## 5. Testing strategy
 
 - **Oracle 1:** ADFlib CLI at pinned commit `73880de7` (`adfls`, `adfinfo`, `unadf`, `adfbitmap`). Reference for listings, metadata, content and bitmap. **Compare listings and content only** — its filesystem-type *string* is `???` for `DOS\2`/`DOS\4` because `adfVolIsFsValid()` is a label/overwrite guard (`src/adf_dev.c:529`, `examples/adfformat.c:134`), not a mount rule. Record that display gap in the oracle script.
@@ -888,6 +945,9 @@ B (page offset 0) each turn a specific named check red; good code passes both.
 - **Rule (M24):** an oracle's *silence* is not agreement, and its stderr is not a damage signal. Before trusting an oracle to refute a change, measure what it does on the **pristine fixture** — `unadf` emits `No such file or directory` for links and some ordinary entries alike, resolves links to their targets, and exits 0 (see M24). An oracle that skips a construct silently looks like evidence of breakage; pin that limit in a gate (`m24_unadf_link_blindness.sh`) rather than rediscovering it.
 - **Rule (M26):** re-measure an inherited claim before building on it. The plan's "extension chains are not implemented, needed above ~50 MB" was wrong in both halves — 600 KB files round-trip correctly. The 312 KB wall it appeared behind was a *bitmap* bug, and the error message pointed at neither.
 - **Rule (M28):** a bitmap bit has TWO coordinate spaces. `afs_bitmap_set/test` address an ASSEMBLED map at offset 0; a raw bitmap PAGE carries its own checksum long in bytes 0..3, so map data starts at `+4` (`afs_bitmap_read` assembles from `blk + 4`). Mixing them writes bits into the checksum word and produces a map no reader agrees with -- seen three times now: `verify.c`'s page reader, `test_verify.c`'s `bm_set()`, and the write fuzzer's fixture. When touching bitmap code, name the space in the comment.
+- **Rule (M29):** when a bug kind appears three times, sweep every remaining site mechanically rather than stopping at the third. The fourth was in the base image of the suite that gates the **allocator**, and 164 checks had agreed about map state no reader would see.
+- **Rule (M29):** a fixture and the code under test that share a *mistake* produce a self-consistently meaningless suite. The allocator read the same wrong offset the fixture wrote, so every check agreed and all were green. When a test's own comment says "the first version got this wrong", read the comment before editing the code — the knowledge is usually already in the file.
+- **Rule (M29):** a static scan is code and needs the same mutation testing as a test. Three versions of this gate's scan passed straight over a planted instance; the fourth catches it. Prefer the least elegant match that actually finds the thing.
 - **Rule (M28):** a harness's comment is a claim, not evidence. The write fuzzer asserted "bitmap agreement" in prose for its whole life while calling the non-strict entry point, which skips the only check it named. Read the call, or run the harness -- do not trust the sentence.
 - **Rule (M28):** a grep cannot prove behaviour when the token also appears in prose. This gate's own first version grepped for `AFS_VERIFY_STRICT` and passed both mutants, because the file's comment names it. Match the CALL (across line breaks) or execute the code.
 - **Rule (M27):** ask whether anything can DETECT the bug you just fixed, by making the broken state and requiring the checker to reject it. A checker blind to the defect is worse than no checker — it reports green forever. Two sites of the same bug is evidence for a third, not a licence to invent one: M27's third-site "fix" was wrong and six existing tests said so immediately.

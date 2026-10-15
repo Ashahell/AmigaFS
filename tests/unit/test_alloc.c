@@ -17,6 +17,7 @@
 #include "amigafs/checksum.h"
 #include "amigafs/dir.h"
 #include "amigafs/file.h"
+#include "amigafs/verify.h"
 #include "amigafs/volume.h"
 
 /* A writable synthetic volume: DOS\1 FFS floppy, rootblock 880, one bitmap
@@ -45,10 +46,25 @@ static uint8_t *build_writable_img(void) {
     put_be32(r + 20, afs_block_checksum(r, 512, 20));
     bm = img + (size_t)IMG_BM * 512;
     /* calloc left every bit 0 ("used"); free everything except the reserved
-     * blocks, then stamp the checksum at byte 0. */
-    for (i = 0; i < IMG_BLOCKS; i++)
-        if (i != 0 && i != 1 && i != IMG_ROOT && i != IMG_BM)
-            afs_bitmap_set(bm, (uint32_t)i);
+     * blocks, then stamp the checksum at byte 0.
+     *
+     * Build the map SEPARATELY and copy it in at +4. A raw bitmap page carries
+     * its own checksum long in bytes 0..3 and map data begins after it, which
+     * is where afs_bitmap_read assembles from. afs_bitmap_set() addresses an
+     * ASSEMBLED map at offset 0, so calling it on `bm` directly parked blocks
+     * 0..31 inside the checksum long and shifted every later block four bytes
+     * early -- leaving the rootblock and the bitmap page themselves reading
+     * FREE. The sibling helper build_writable_img_free() below already
+     * documents this in full; this is the same correction applied here. */
+    {
+        static uint8_t map[512];
+        memset(map, 0, sizeof map);
+        for (i = 0; i < IMG_BLOCKS; i++)
+            if (i != 0 && i != 1 && i != IMG_ROOT && i != IMG_BM)
+                afs_bitmap_set(map, (uint32_t)i);
+        memset(bm, 0, 512);
+        memcpy(bm + 4, map, 508);          /* the data area starts at 4 */
+    }
     put_be32(bm + 0, afs_block_checksum(bm, 512, 0));
     return img;
 }
@@ -508,8 +524,68 @@ static void test_enospc_leaves_content_intact(void) {
     free(img);
 }
 
+/* The volume every allocation test runs against must have a map the LIBRARY
+ * can actually read. This is the fourth instance of the same defect (after
+ * verify.c's page reader, test_verify.c's bm_set(), and write_fuzz.c's
+ * fixture): `afs_bitmap_set` addresses an ASSEMBLED map at offset 0, while a
+ * raw bitmap PAGE carries its own checksum long in bytes 0..3, so page data
+ * begins at +4. Using the setter on a page parks blocks 0..31 inside the
+ * checksum and every other block 4 bytes early.
+ *
+ * It went unnoticed because build_writable_img() is the base image for every
+ * test in this file, so all 161 checks agreed with each other about map state
+ * that no reader would ever see. The sibling helper build_writable_img_free()
+ * already documents the gotcha in full and does it correctly -- it builds the
+ * map separately and copies it into the page at +4. This test is that
+ * observation applied to the base image.
+ *
+ * Note the allocator reads the SAME wrong region, so allocations still
+ * succeeded; the suite was testing self-consistent nonsense. */
+static void test_the_base_volume_has_a_readable_map(void) {
+    uint8_t *img = build_writable_img();
+    CHECK(img != NULL, "the base volume builds");
+    if (!img) return;
+
+    afs_volume_t *v = NULL;
+    char err[256] = {0};
+    CHECK(afs_volume_open_memory(img, (size_t)IMG_BLOCKS * 512, 512, &v,
+                                 err, sizeof err) == 0,
+          "the base volume opens (%s)", err);
+    if (!v) { free(img); return; }
+
+    /* Strict is the only mode that checks the tree against the map -- which is
+     * exactly the question ("is every live block marked used?") this test is
+     * asking. */
+    afs_verify_report_t rep[16];
+    int n = afs_verify_memory_ex(img, (size_t)IMG_BLOCKS * 512, 512, rep, 16,
+                                 AFS_VERIFY_STRICT);
+    for (int i = 0; i < n && i < 3; i++)
+        printf("         [k%d blk %u] %s\n", (int)rep[i].kind, rep[i].block,
+               rep[i].detail);
+    CHECK_EQ_U(n, 0,
+               "every block the tree references is marked used in the map");
+
+    /* And the map must say what the comment above it claims: all but
+     * {0, 1, 880, 881} free. */
+    uint32_t nb = afs_volume_block_count(v);
+    size_t mb = ((size_t)nb + 31u) / 32u * 4u;
+    uint8_t *map = calloc(1, mb);
+    afs_bitmap_read(v, map, mb);
+    CHECK(!afs_bitmap_test(map, 0),  "block 0 is used");
+    CHECK(!afs_bitmap_test(map, 1),  "block 1 is used");
+    CHECK(!afs_bitmap_test(map, IMG_ROOT), "the rootblock is used");
+    CHECK(!afs_bitmap_test(map, IMG_BM),   "the bitmap page is used");
+    CHECK(afs_bitmap_test(map, 2),  "block 2 is free");
+    CHECK(afs_bitmap_test(map, 100), "block 100 is free");
+    CHECK(afs_bitmap_test(map, nb - 1), "the last block is free");
+    free(map);
+    afs_volume_close(v);
+    free(img);
+}
+
 int main(void) {
     printf("alloc/write\n");
+    test_the_base_volume_has_a_readable_map();
     test_write_backend_memory();
     test_allocator_first_free();
     test_file_create_write_read();
