@@ -935,6 +935,133 @@ finds the thing — verified by planting an instance in `test_dir.c` and watchin
 versions pass straight over it.
 
 
+## M34 — second-large-write corruption: root cause found, fix awaiting a decision (2026-10-15)
+
+**Status: DIAGNOSED, NOT SHIPPED.** Both candidate fixes were implemented and
+measured; the tree is reverted to the M33 baseline (30/30 gates, 45/45 ctest)
+pending a decision recorded below. The diagnosis is the durable part.
+
+### The symptom
+
+On `testffs.adf`, one of the project's own fixtures — healthy, and accepted for
+writing:
+
+| | result |
+|---|---|
+| 1 × 300 KB write | `OK, no structural problems found` |
+| 2 × 300 KB writes | **20 problems** |
+| 1 × 50 KB write | `OK` |
+
+Blocks 1222 (`hlink_blue`) and 883 (`dir_2`) came back with invalid checksums
+and unknown types, and **both entries had vanished from the listing**. A third
+write then failed with `dir-cache chain corrupt` — because the dir-cache block
+it needed, 1220, had been overwritten.
+
+### Root cause
+
+**The fixture's allocation map marks exactly three blocks allocated** — the
+rootblock (880), one dir-cache block (881), and the map page itself (882). Its
+tree references dozens more. Live blocks **1220, 1222 and 883 are all marked
+FREE**.
+
+The pattern is arithmetic, not mysterious:
+
+| write | blocks taken | collides? |
+|---|---|---|
+| 1st (600 blocks) | 2 – 601 | no — every live block sits above 880 |
+| 2nd (600 blocks) | 602 – 1201 | **yes: 883, 885, 886, 1142, 1148, 1160, 1161, 1193** |
+
+So the allocator, correctly following the map, hands out blocks that are live.
+
+**Why the existing guard missed it.** `check_bitmap_root` has two conditions:
+`bm_flag == -1` (AmigaDOS's own "this map is valid" claim) and a page count
+suits the volume. Both are about the map's **self-consistency**; neither says
+the map **agrees with the data**. `testffs.adf` passes both. `bm_flag == -1` is
+AmigaDOS's claim, and on this image it plainly does not mean what it appears to.
+
+### Both fixes implemented and measured
+
+- **Repair at write-open** (`afs_bitmap_rebuild` on every rw open). Fixes it
+  completely — verify *and* `--strict` clean, all 16 original entries readable —
+  but silently mutates the map. Breaks **4 gates whose subject is the map**
+  (`m18` can no longer test a rebuild that already happened; `m33`'s
+  "orphan count unchanged" is wrong because 22 orphans were correctly
+  reclaimed; `m14`'s bitmap accounting; `mount_fuzz`).
+- **Refuse with a name and the remedy** (a third guard calling the verifier's
+  walk). Clean, honest, consistent with the two refusals already there — and
+  **breaks 7 gates and 164 unit checks**, because nearly every fixture has a
+  stale map. In the field it means the tool refuses to write on most real
+  floppies unless the user knows to run `afs bitmap-rebuild` first.
+
+### The decision
+
+**Chosen: refuse, with the remedy named.** Consistent with the two refusals
+already in the allocator, and it never silently mutates a user's disk.
+
+**NOT shipped, because the remedy is itself broken.** Naming a command that
+fails is worse than not naming it, and `afs bitmap-rebuild` fails on the OFS
+fixtures:
+
+```
+$ afs bitmap-rebuild blank.adf --yes
+afs: directory block 880 has a corrupt dircache chain
+
+$ afs bitmap-rebuild testofs.adf --yes
+afs: directory block 880 has a corrupt dircache chain
+
+$ afs bitmap-rebuild testffs.adf --yes      # DOS\5, has a dir-cache
+...: 1760 blocks, 343 used, 1417 free, 23 reclaimed      # works
+```
+
+`blank.adf` is **DOS\0 OFS** and `testofs.adf` is **DOS\2 OFS/INTL** — neither
+has a dir-cache at all, so there is no chain to be corrupt. The rebuild is
+consulting the extension field at `BS-8` without first asking whether the volume
+is `DIRC`. `afs verify` and `afs ls` both read those volumes correctly, so this
+is the rebuild alone, and it is exactly the same family as M21's wrong dircache
+chain offset.
+
+**So the order is fixed, and it is not optional:**
+
+1. **Fix `bitmap-rebuild` on non-DIRC volumes.** Until this lands there is no
+   correct remedy to name, so the guard cannot ship. (One condition: gate the
+   dircache handling on `afs_volume_has_dircache`.)
+2. **Then the M34 guard** (`afs_verify_map_disagrees`, already written) plus the
+   rebuild line in the gates that write — measured cascade was 7 gates and 164
+   unit checks, because **every** fixture in the repo carries a stale map, which
+   is consistent with the long-standing note that 10 of 11 do.
+3. **`test_alloc.c`'s synthetic volume** needs its map corrected rather than
+   rebuilt: it is the fixture for the allocator, so per M29 its map must be
+   right rather than repaired. That is the same defect class as M29's fourth
+   instance, and it is the fixture sharing the mistake.
+
+The gate-side work was done and verified (m31, m32 and m33 went green with one
+rebuild line each); it is held, not lost.
+
+### Also found while implementing
+
+**A per-allocation check must not scale with the volume.** The first version of
+`afs_verify_map_disagrees` copied the whole image and called
+`afs_verify_memory_ex`. It sits in `afs_alloc_block`, so writing a 600-block
+file would have copied 1760 blocks 600 times. The version that ships walks the
+*tree* directly through `visit_entry(afs_volume_t*, ...)` — the same order of
+work as the bitmap read the caller was already doing, and it reuses the
+verifier's walk so there is exactly one definition of "referenced by the tree".
+
+### Rules M34
+
+### Rules M34
+
+- **M34.1 — A self-consistent map is not an accurate map.** The two guards
+  checked that the map was well-formed. The defect was that it was *wrong*.
+  **When trusting a derived structure, check it against its source, not against
+  its own shape.**
+- **M34.2 — Validate before allocating, or every allocation is a lottery.** The
+  map is consulted once per block; a single wrong bit silently destroys
+  something else.
+- **M34.3 — Read the symptom's arithmetic.** "1 write fine, 2 corrupt" looked
+  like a size threshold and turned out to be `2..601` vs `602..1201` against a
+  fixture whose live blocks all sit above 880. The numbers named the cause.
+
 ## M33 — making a leak visible, and what that immediately found (2026-10-15)
 
 M32 ended with a defect nothing could see: a leaked block is invisible because
