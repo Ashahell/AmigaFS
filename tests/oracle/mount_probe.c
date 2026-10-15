@@ -36,6 +36,7 @@
 
 static unsigned long c_dirs, c_entries, c_files, c_symlinks, c_xattrs, c_bytes;
 static unsigned long c_dirhard;   /* C12 dir hard links: refused by design */
+static unsigned long c_unreachable; /* name no longer hashes to its own bucket */
 static int failures;
 
 /* Resume a directory listing at an arbitrary cookie. The kernel normally only
@@ -75,6 +76,26 @@ static void visit(const char *path, int depth, int maxdepth) {
          * other reason is a real defect, and lumping them together would let a
          * genuine failure hide behind a designed refusal. */
         if (errno == ENOTDIR) { c_dirhard++; return; }
+        if (errno == ENOENT) {
+            /* A name whose bytes no longer hash to its own bucket is
+             * unreachable BY THE FORMAT, not by the mount. readdir walks EVERY
+             * bucket so it still shows such a name; lookup computes hash(name)
+             * and reads that bucket, where the entry is not filed. Measured:
+             * 'multidef' -> bucket 46, one byte mutated to 0xFE -> bucket 16,
+             * and the entry stays at 46. ADFlib uses the same hash and the same
+             * bucket lookup, so it answers identically.
+             *
+             * Counted separately and REPORTED, never failed. Whitelisting it
+             * here without a cross-check would be catastrophic masking: a mount
+             * whose lookup was broken entirely would ENOENT on every name and
+             * this probe would report zero failures. So mount_fuzz.sh asks the
+             * library -- the format's own authority -- about each one, and
+             * fails the gate if the library CAN find what the mount could not.
+             */
+            c_unreachable++;
+            fprintf(stderr, "probe: unreachable %s\n", path);
+            return;
+        }
         fprintf(stderr, "probe: lstat %s failed: %s\n", path, strerror(errno));
         failures++;
         return;
@@ -161,7 +182,8 @@ int main(int argc, char **argv) {
     int maxdepth = argc > 2 ? atoi(argv[2]) : 12;
     walk(argv[1], 0, maxdepth);
     printf("probe: dirs=%lu entries=%lu files=%lu symlinks=%lu xattrs=%lu "
-           "bytes=%lu dirhard=%lu\n",
-           c_dirs, c_entries, c_files, c_symlinks, c_xattrs, c_bytes, c_dirhard);
+           "bytes=%lu dirhard=%lu unreachable=%lu\n",
+           c_dirs, c_entries, c_files, c_symlinks, c_xattrs, c_bytes, c_dirhard,
+           c_unreachable);
     return failures ? 1 : 0;
 }

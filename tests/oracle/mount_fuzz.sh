@@ -36,6 +36,7 @@ IMG="$WORK/img.adf"
 MNT="$WORK/mnt"
 
 fails=0
+tot_unreachable=0
 err() { printf '  %-46s FAIL\n' "$1"; fails=$((fails+1)); }
 ok()  { printf '  %-46s %s\n' "$1" "$2"; }
 
@@ -173,6 +174,35 @@ for i in $(seq 1 "$ITERS"); do
         probe_fail=$((probe_fail+1))
         head -2 "$WORK/probe.err" | sed "s/^/      iter $i: /"
     fi
+
+    # CROSS-CHECK every name the mount refused with ENOENT. The probe counts
+    # those separately rather than failing, because a name whose bytes no longer
+    # hash to its own bucket is unreachable BY THE FORMAT: readdir walks every
+    # bucket and still shows it, while lookup computes hash(name) and reads a
+    # bucket the entry is not filed in. ('multidef' -> bucket 46; one byte
+    # mutated -> bucket 16, entry still at 46.) ADFlib answers identically.
+    #
+    # But whitelisting them without a second opinion would mask a mount whose
+    # lookup was broken entirely -- every name would ENOENT and the gate would
+    # pass. So ask the library, which is the format's authority: if `afs ls`
+    # CAN find what the mount could not, the MOUNT lost a reachable entry and
+    # that is a real defect.
+    unreachable=0
+    mount_lost=0
+    while IFS= read -r u; do
+        [ -n "$u" ] || continue
+        unreachable=$((unreachable+1))
+        rel="${u#"$MNT"/}"
+        [ "$rel" != "$u" ] || continue
+        if "$ROOT/build/afs" ls "$IMG" "/$rel" >/dev/null 2>&1; then
+            mount_lost=$((mount_lost+1))
+            echo "      iter $i: MOUNT LOST a reachable entry: /$rel" >&2
+        fi
+    done < <(sed -n 's/^probe: unreachable //p' "$WORK/probe.err")
+    tot_unreachable=$((tot_unreachable + unreachable))
+    if [ "$mount_lost" -gt 0 ]; then
+        probe_fail=$((probe_fail+1))
+    fi
     # harvest coverage even from a partial walk
     e=$(sed -n 's/.*entries=\([0-9]*\).*/\1/p' <<< "$out")
     f=$(sed -n 's/.*files=\([0-9]*\).*/\1/p' <<< "$out")
@@ -231,6 +261,12 @@ else
     ok "reached the parser through a real mount" \
        "$mounted mounted, $refused refused, $entries entries, $files files"
 fi
+
+# Report the separately-counted ENOENTs so the number is visible rather than
+# quietly absorbed. A non-zero count is EXPECTED on mutated images; what would
+# not be acceptable is one the library could still reach, and that fails above.
+ok "names refused as unreachable by the format" \
+   "$tot_unreachable (each cross-checked against the library)"
 
 echo
 echo "--- write lane: the FUSE write ops through a real -o rw mount ---"
