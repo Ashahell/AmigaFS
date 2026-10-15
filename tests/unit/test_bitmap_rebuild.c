@@ -282,7 +282,120 @@ static void test_rebuild_writes_both_bitmap_pages(void) {
     free(img);
 }
 
+/* The ROOTBLOCK'S OWN dir-cache chain must survive a rebuild.
+ *
+ * Found by a real corruption, not by inspection: four consecutive 256 KB writes
+ * to a DOS\5 volume, the fourth destroyed the root's dir-cache block -- the
+ * allocator handed that block out as FILE DATA because the rebuild had marked
+ * it free. The write then failed with "dir-cache chain corrupt", a message
+ * about a subsystem the user never touched.
+ *
+ * rb_walk called rb_mark_dircache only for CHILD directories (kind == DIR).
+ * The directory it was HANDED -- the rootblock -- never had its own chain
+ * marked, so every root-level cache block was freed by the rebuild and later
+ * handed to file data.
+ *
+ * This is a data-loss bug wearing a data-integrity bug's clothes: the volume
+ * LOOKED fine and `verify` said clean right up until a write clobbered it. */
+static void add_root_dircache(uint8_t *img) {
+    uint8_t *r = img + 8 * BS;
+    /* cache block 10, hanging off the root's bs-8, chain terminated */
+    uint8_t *cb = img + 10 * BS;
+    memset(cb, 0, BS);
+    put_be32(cb + 0, AFS_T_DIRCACHE);
+    put_be32(cb + 4, 10);            /* headerKey: self-pointer */
+    put_be32(cb + 8, 8);             /* parent: the rootblock */
+    put_be32(cb + 12, 1);            /* recordsNb */
+    put_be32(cb + 16, 0);            /* nextDirC: single-block chain */
+    put_be32(cb + 20, afs_block_checksum(cb, BS, 20));
+    put_be32(r + BS - 8, 10);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+}
+
+static void test_rebuild_keeps_the_rootblocks_dircache(void) {
+    uint8_t img[NBLK * BS];
+    build_vol(img);
+    add_root_dircache(img);
+
+    afs_volume_t *v = NULL;
+    char err[256] = {0};
+    CHECK(afs_volume_open_memory(img, sizeof img, BS, &v, err, sizeof err) == 0,
+          "volume opens (%s)", err);
+    if (!v) return;
+
+    afs_bitmap_rebuild_stats_t st;
+    CHECK(afs_bitmap_rebuild(v, &st, err, sizeof err) == 0,
+          "rebuild succeeds on a volume whose root has a cache chain (%s)", err);
+
+    uint32_t n = afs_volume_block_count(v);
+    size_t mapbytes = ((size_t)n + 31u) / 32u * 4u;
+    uint8_t *map = calloc(1, mapbytes);
+    CHECK(afs_bitmap_read(v, map, mapbytes) >= 0, "map readable");
+    /* bm_get semantics: a CLEAR bit means USED */
+    CHECK(!bm_get(map, 10),
+          "the root's dir-cache block 10 is marked USED, not freed");
+    CHECK(!bm_get(map, 8),  "the rootblock itself is used");
+    CHECK(!bm_get(map, 9),  "the bitmap page is used");
+    free(map);
+    afs_volume_close(v);
+}
+
+/* The same for a CHILD directory's chain -- the case that already worked, kept
+ * so the fix for the rootblock cannot regress it. */
+static void test_rebuild_keeps_a_subdirs_dircache(void) {
+    uint8_t img[NBLK * BS];
+    build_vol(img);
+
+    /* a subdirectory entry at block 11 in the root's hash table, whose own
+     * cache chain is block 12 */
+    uint8_t *d = img + 11 * BS;
+    memset(d, 0, BS);
+    put_be32(d, AFS_T_HEADER);
+    put_be32(d + 12, (uint32_t)afs_hash_table_size(BS));
+    put_be32(d + BS - 12, 8);
+    put_be32(d + BS - 8, 12);              /* its dircache chain */
+    put_be32(d + BS - 4, AFS_ST_USERDIR);
+    d[BS - 80] = 3; memcpy(d + BS - 79, "sub", 3);
+    put_be32(d + 20, afs_block_checksum(d, BS, 20));
+
+    uint8_t *cb = img + 12 * BS;
+    memset(cb, 0, BS);
+    put_be32(cb, AFS_T_DIRCACHE);
+    put_be32(cb + 4, 12);
+    put_be32(cb + 8, 11);
+    put_be32(cb + 12, 1);
+    put_be32(cb + 16, 0);
+    put_be32(cb + 20, afs_block_checksum(cb, BS, 20));
+
+    /* file it into the root's hash table */
+    uint8_t *r = img + 8 * BS;
+    uint32_t bucket = afs_hash("sub", 3, (uint32_t)afs_hash_table_size(BS), 0x01);
+    put_be32(r + 24 + 4 * bucket, 11);
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));
+
+    afs_volume_t *v = NULL;
+    char err[256] = {0};
+    CHECK(afs_volume_open_memory(img, sizeof img, BS, &v, err, sizeof err) == 0,
+          "volume opens (%s)", err);
+    if (!v) return;
+
+    afs_bitmap_rebuild_stats_t st;
+    CHECK(afs_bitmap_rebuild(v, &st, err, sizeof err) == 0,
+          "rebuild succeeds (%s)", err);
+
+    uint32_t n = afs_volume_block_count(v);
+    size_t mapbytes = ((size_t)n + 31u) / 32u * 4u;
+    uint8_t *map = calloc(1, mapbytes);
+    CHECK(afs_bitmap_read(v, map, mapbytes) >= 0, "map readable");
+    CHECK(!bm_get(map, 11), "the subdirectory block is used");
+    CHECK(!bm_get(map, 12), "the subdirectory's dir-cache block is used");
+    free(map);
+    afs_volume_close(v);
+}
+
 int main(void) {
+    test_rebuild_keeps_the_rootblocks_dircache();
+    test_rebuild_keeps_a_subdirs_dircache();
     test_rebuild_never_frees_the_structural_blocks();
     test_rebuild_sets_the_valid_flag();
     test_rebuild_frees_what_the_tree_does_not_reach();

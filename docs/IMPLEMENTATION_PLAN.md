@@ -729,6 +729,58 @@ had **no bitmap at all** — every block read as USED, so any allocating call re
 "volume full". The read-only tests never noticed; the first allocating test did.
 
 
+## M26 — the rootblock's own dir-cache chain was freed by every rebuild (2026-10-15)
+
+Found by asking an inherited claim a question, not by a failing gate. The plan
+carried "extension chains are not implemented — needed only above ~50 MB". Measuring
+instead of trusting: **600 KB files round-trip correctly**, so extension chains are
+implemented and fine. Pushing further found a hard wall at ~312 KB with
+
+```
+afs: cannot write /big320: dir-cache chain corrupt
+```
+
+which is wrong on both counts — 1132 blocks were free (a 320 KB file needs ~640), and
+the message names a subsystem the user never touched.
+
+**The bug.** `rb_walk` called `rb_mark_dircache` only for entries of kind
+`AFS_BLOCK_DIR`. The directory it was *handed* — the rootblock, the one call at the
+top of `afs_bitmap_rebuild` — never had its own chain marked, and nothing else marks
+it either. Every **root-level** dir-cache block therefore came out of every rebuild
+marked **FREE**, and the allocator later handed one out as **file data**.
+
+Isolated exactly: on `testhd.adf`, the 4th consecutive 256 KB write destroys block
+1761 (the root's cache block), which then contains `'e'` — the fill byte of the 4th
+file. Block 1761 sits inside that file's data range `[1563..2074]`.
+
+**Why nothing caught it.** The damage is silent and *delayed*. The rebuild succeeds,
+`verify` says the volume is clean, every read is correct, and the volume works
+perfectly — right up until a write big enough to need extension blocks lands on the
+freed block. It is a data-loss bug wearing a data-integrity bug's clothes.
+
+**The fix** is four lines in `rb_walk`, marking the directory's own chain before its
+entries — which is harmless for every subdirectory (its parent already marked it) and
+correct for the rootblock, the one directory nobody marks.
+
+**Also found and fixed in the same trace:** my own probe read the cache block with
+little-endian arithmetic and reported `checksum_ok=0` and a garbage chain, which
+briefly looked like corruption of the *fixture*. It was the probe. `be32` is not
+optional; the same mistake as M21's `headerKey`-at-`+4`, in a new place.
+
+**Gates.** Unit: `test_rebuild_keeps_the_rootblocks_dircache` (RED for exactly the
+right reason — block 10 comes out free — with the already-working *subdirectory* case
+kept alongside so the fix cannot regress it). Oracle: `m26_root_dircache_survives.sh`
+(24th) reproduces the four-write sequence and asserts the writes SUCCEED, the chain's
+block sequence is unchanged, every chain block is still valid, and any refusal is the
+truthful one. Load-bearing proven: reverting the fix turns write #4 red with the
+original misleading message.
+
+Two of my own gate assertions were wrong first and were corrected rather than
+adjusted to match the code: the chain's record count is *expected* to grow with each
+new file (asserting it unchanged asserted the bug's symptom), and reusing one temp
+file for four content comparisons compared three files against the fourth's bytes.
+
+
 ## 5. Testing strategy
 
 - **Oracle 1:** ADFlib CLI at pinned commit `73880de7` (`adfls`, `adfinfo`, `unadf`, `adfbitmap`). Reference for listings, metadata, content and bitmap. **Compare listings and content only** — its filesystem-type *string* is `???` for `DOS\2`/`DOS\4` because `adfVolIsFsValid()` is a label/overwrite guard (`src/adf_dev.c:529`, `examples/adfformat.c:134`), not a mount rule. Record that display gap in the oracle script.
@@ -737,7 +789,8 @@ had **no bitmap at all** — every block read as USED, so any allocating call re
 - **Cross-check, not an oracle:** AROS `afs`, for checksum, hash and `capitalch` only (C5).
 - **Rule:** every read path must match the oracle on every fixture before it counts as done. Where an oracle is known to be weak (ADFlib RDB is experimental upstream), a disagreement is a **recorded finding**, not a pass.
 - **Rule (M24):** an oracle's *silence* is not agreement, and its stderr is not a damage signal. Before trusting an oracle to refute a change, measure what it does on the **pristine fixture** — `unadf` emits `No such file or directory` for links and some ordinary entries alike, resolves links to their targets, and exits 0 (see M24). An oracle that skips a construct silently looks like evidence of breakage; pin that limit in a gate (`m24_unadf_link_blindness.sh`) rather than rediscovering it.
-- **Rule (M24):** a before/after count is only a measurement if the *before* is taken under identical conditions. The "9 → 3" that started M24 compared a populated extraction tree against a differently-populated one.
+- **Rule (M26):** re-measure an inherited claim before building on it. The plan's "extension chains are not implemented, needed above ~50 MB" was wrong in both halves — 600 KB files round-trip correctly. The 312 KB wall it appeared behind was a *bitmap* bug, and the error message pointed at neither.
+- **Rule (M26):** a rebuild is only as complete as its walk. "The rootblock is marked" is not "the rootblock's structures are marked" — the rootblock is the one directory no parent marks, so every rule that fires for children silently misses it. The "9 → 3" that started M24 compared a populated extraction tree against a differently-populated one.
 - **Fixtures:** pinned by sha256 in `fixtures.lock`, with measured DOS types. ADFlib's test data carries no separate licence: downloaded at test time, never committed or shipped. The `adfformat`-generated images are ours.
 
 ---

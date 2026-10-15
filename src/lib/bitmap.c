@@ -268,6 +268,23 @@ static int rb_walk(rb_ctx_t *c, uint32_t dirblk, int depth) {
     }
 
     int rc = 0;
+    /* Mark THIS directory's own dir-cache chain before its entries.
+     *
+     * The entries below only call rb_mark_dircache for CHILD directories
+     * (kind == AFS_BLOCK_DIR), so the directory we were HANDED never had its
+     * own chain marked. For every subdirectory that is fine -- the parent marks
+     * it. For the rootblock it was not: rb_walk is called once with the
+     * rootblock and nothing else marks it, so every root-level cache block came
+     * out of a rebuild marked FREE.
+     *
+     * That is silent and then lethal. The volume verified clean and read
+     * correctly until the allocator handed one of those blocks out as FILE
+     * DATA: four consecutive 256 KB writes to a DOS\5 volume, the fourth
+     * destroyed the root's dir-cache block and failed with "dir-cache chain
+     * corrupt" -- naming a subsystem the user never touched. */
+    rc = rb_mark_dircache(c, dirblk);
+    if (rc != 0) { free(ents); return rc; }
+
     for (size_t i = 0; i < n && rc == 0; i++) {
         uint32_t b = ents[i].block;
         rb_mark(c, b);                       /* the entry's own header block */
