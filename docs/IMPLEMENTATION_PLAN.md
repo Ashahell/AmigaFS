@@ -1302,6 +1302,73 @@ things a 1→2 block append must get right: that block 1 is really allocated and
 really written, and that block 0's `next` points at it. `m13_write.sh` covers
 growth, but on volumes with free blocks to spare; `ffdisk0049.adf`'s 40 free
 blocks are the distinguishing condition and no existing gate uses it.
+### The minimal reproduction, and four ways I misled myself getting there
+
+The reproduction is now one command and it is exact:
+
+```sh
+cp tests/fixtures/ffdisk0049.adf v.adf
+build/afs bitmap-rebuild v.adf --yes
+build/amigafs-fuse -f v.adf mnt -o rw &
+WPROBE_TRACE=1 mount_write_probe mnt 72 17        # -> iter 71, wrong bytes
+```
+
+| iterations | result |
+|---|---|
+| 10 | PASS |
+| 40 | PASS |
+| 71 | PASS |
+| **72** | **FAIL -- `iter 71 op append: write landed wrong bytes`** |
+
+72 is the minimum, and it is deterministic on seed 17. Every earlier run of
+this investigation was 250 iterations, because a positional-argument mistake in
+my own harness (`ITERS=${3:-250}` when I was passing the count as `$2`, then
+`${2:-250}` when I passed it as `$1`) silently ran 250 every time.
+
+**What is proven correct, by direct test, so the search does not repeat it:**
+
+- **The library's 1 -> 2 block append.** A test that creates 228 bytes and
+  extends to 528 in one call -- genuinely past the 488-byte OFS payload, so
+  genuinely a second block -- round-trips byte-exact on `ffdisk0049`, `testffs`
+  and `testofs`, with no mount involved.
+- **The allocator on a full volume.** On the 1760/1760 image, `afs_alloc_block`
+  returns `-1` with *"volume full: no free block"* and hands back no block. It
+  is not handing out blocks it should not have.
+
+So the defect needs the *state* the preceding ~70 operations build. The write
+path and the allocator are each right in isolation; the interaction is wrong.
+That points at block reuse across the churn -- the run does creates, unlinks,
+renames and mkdirs before iter 71, and an unlink returns a block to the pool.
+
+**Four errors of mine, all of which pointed somewhere false:**
+
+1. **`dd`'s default `bs=512`** split one append into 16 writes, so the file
+   grew normally and only the last write failed. "7168 bytes committed" was a
+   fact about `dd`, not the library. (Recorded in part 6.)
+2. **The library test used `add = 260`**, giving exactly 488 bytes -- *one*
+   payload block. It was testing 1 -> 1 while its own comment claimed 1 -> 2,
+   and it passed for that reason. The genuine 1 -> 2 case (`add = 300`) also
+   passes, but the first test proved nothing it claimed to.
+3. **The harness reported `iter 71` for a 10-iteration run.** That is
+   impossible: `g_iter = it` under `it < iters`, so `g_iter` cannot exceed 9.
+   I should have treated the impossible output as proof that my harness was
+   wrong, instead of accepting it for three consecutive runs. An impossible
+   measurement is not a measurement.
+4. **I inferred the volume was full at iter 71 from the final image being
+   1760/1760.** It says nothing about iter 71, because the probe **unlinks**
+   files -- iter 70 is one -- and an unlink frees blocks. The volume was not
+   full when the append ran.
+
+**What the next step should be.** Not instrumentation of the write path, which
+is now excluded, and not the allocator, which is excluded. The remaining
+candidate is block reuse: a block freed by an unlink, handed to a later create,
+and then reached through a stale pointer -- most likely a directory whose entry
+still names a header block that has since been reused. The reproduction is
+cheap enough to bisect on the trace: run 72 iterations with `WPROBE_TRACE=1`,
+then re-run with the unlink and rename operations suppressed, and see whether
+iter 71 still fails. If suppressing them clears it, the defect is in reuse
+after removal; if it still fails, the prior state is only a directory layout
+and the fault is in how a header block is resolved.
 ### Rules M34
 
 - **M34.1 — A self-consistent map is not an accurate map.** The two guards
