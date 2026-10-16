@@ -85,7 +85,9 @@ if [[ "$SRC_BEFORE" != "$SRC_AFTER" ]]; then
     echo "  gate inside the run it is guarding."
     fail=1
 else
-    echo "source integrity: PASS (tracked tree unchanged across all 38 gates)"
+    # counted, never typed: a hardcoded count is a claim that goes stale the next
+    # time a gate is added, which is rule 286's shape in a single word.
+    echo "source integrity: PASS (tracked tree unchanged across all ${#GATES[@]} gates)"
 fi
 
 echo

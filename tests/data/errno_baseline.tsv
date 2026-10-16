@@ -53,6 +53,7 @@ dir.c	directory {arg} has no usable hash table	5
 dir.c	entry block {arg} outside volume	5
 file.c	extension chain corrupt	5
 file.c	file too large (past 4 GiB)	27
+volume.c	filesystem id '{arg}{arg}{arg}{arg}' is not an AmigaDOS filesystem (only DOS\\0-DOS\\5)	5
 dir.c	hash chain corrupt in directory {arg}	5
 dir.c	invalid name (1..30 bytes, no '/' or ':')	22
 volume.c	invalid partition window in '{arg}'	5

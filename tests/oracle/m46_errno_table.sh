@@ -110,10 +110,29 @@ if [ ! -f "$BASE" ]; then
     echo "  missing baseline makes every fresh clone green on its first run."
     echo
     echo "  To create it deliberately, on a tree you have reviewed:"
-    echo "      mkdir -p tests/data && cp <table> $BASE"
+    echo "      bash tests/oracle/m46_errno_table.sh --write-baseline"
     echo
     echo "M46 gate: FAIL (no baseline)"
     exit 1
+fi
+
+# The same opt-in m47 has, and for the same reason. This gate's failure message
+# used to tell you to `cp <table> $BASE` -- an instruction that COULD NOT BE
+# FOLLOWED: the scratch directory is removed by the EXIT trap the moment the gate
+# exits, so the table it just printed was already gone by the time you read the
+# advice. A remedy that cannot be carried out is worse than no remedy, because it
+# looks like there is one. The flag writes the table BEFORE the trap runs.
+if [ "${1:-}" = "--write-baseline" ]; then
+    mkdir -p "$(dirname "$BASE")"
+    cp "$W/table.tsv" "$BASE"
+    echo
+    echo "  baseline WRITTEN (deliberate): $BASE"
+    echo
+    echo "  Read it before committing. A baseline written without being read is"
+    echo "  just a snapshot of whatever the code happened to do."
+    echo
+    echo "M46 gate: PASS (baseline written; re-run WITHOUT the flag to check it)"
+    exit 0
 fi
 
 if diff -u "$BASE" "$W/table.tsv" > "$W/diff.txt"; then
@@ -128,8 +147,8 @@ else
     echo
     grep -E '^[+-][^+-]' "$W/diff.txt" | head -20 | sed 's/^/    /'
     echo
-    echo "  If the change is intended:"
-    echo "      cp $W/table.tsv $BASE"
+    echo "  If the change is intended, accept the new table with the same opt-in:"
+    echo "      bash tests/oracle/m46_errno_table.sh --write-baseline"
 fi
 
 echo
