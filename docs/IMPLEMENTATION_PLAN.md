@@ -1090,6 +1090,34 @@ Two things follow, and they are the same lesson:
 
 Both are written and measured; they stay out of the tree while one gate is red.
 
+### Narrowed further: it is the MOUNT write path, not the library
+
+What the probe actually asserts: `region_is()` compares the probe's **model**
+against what it read back, and only after the syscall reported success. So
+"write landed wrong bytes" means the write returned 0 and the data came back
+different -- silent corruption, the exact class this project exists to catch.
+
+Attempting to reproduce it outside the fuzzer, on `testffs.adf` with one
+structural byte flipped in block 1142:
+
+| path | result |
+|---|---|
+| `afs put` + `afs cat`, rebuild then damage | **bytes correct** |
+| `afs put` + `afs cat`, damage only | **bytes correct** |
+| the same, on `testofs.adf` and `blank.adf` | **bytes correct** |
+
+So the **CLI write path does not reproduce it on any fixture tried.** The
+failure is specific to writing **through a live FUSE mount** -- `create` plus
+`setattr`/`extend` plus `write` -- which is a different path with its own block
+allocation and its own truncation/extension handling.
+
+That is as far as the reproduction got: the mount case could not be driven
+deterministically from the shell, because the fuzzer's own seeded byte flips are
+what produce it and a hand-made one-byte flip does not. **So the next step is a
+seeded single-iteration reproduction using `mount_fuzz.sh`'s own `rnd()`
+sequence at the iterations that failed (7 strict, 7 and 18 lenient), rather than
+a hand-built approximation of it.**
+
 ### Rules M34
 
 - **M34.1 — A self-consistent map is not an accurate map.** The two guards
