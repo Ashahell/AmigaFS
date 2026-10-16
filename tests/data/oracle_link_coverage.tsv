@@ -1,0 +1,6 @@
+oracle	src/lib exit 0, unadf extracts into cwd
+fixture	testffs.adf (pristine, no writes)
+oracle_sees	10
+we_report	14
+no_external_oracle	hlink_blue hlink_dir1 hlink_dir2 slink_dir1
+reason	amitools xdftool: Unsupported Dir Block, Sub_Type fffffffc (-4, ADF_ST_LFILE); unadf skips silently
