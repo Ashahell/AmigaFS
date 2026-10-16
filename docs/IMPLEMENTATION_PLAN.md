@@ -1756,6 +1756,35 @@ itself about and no oracle can check.
 
 **And the plan's instruction is corrected in place**, because leaving a
 prescribed method that cannot work is how the next session spends a day on it.
+### M39 — a libFuzzer target over blockio (2026-10-16)
+
+Closes the "hostile images" open risk. `blockio` is the one place the core
+touches storage and its own header calls it the security boundary, yet it had
+unit tests and **no fuzz target** — so the only hostile inputs it ever saw were
+the ones a test author chose.
+
+The target (`tests/fuzz/fuzz_blockio.c`) asks for 0, the last block, `last+1`,
+`0x7FFFFFFF`, `0x80000000` and `0xFFFFFFFF` through read, read_span and write,
+plus a sweep of every real block. Block size comes from the input rather than
+being fixed, and two unsupported sizes are included so the reject path is
+exercised too.
+
+**Measured:** 20000 inputs, **79 new coverage units**, no out-of-bounds access.
+
+The coverage floor is on `new_units_added`, **not** on
+`number_of_executed_units` — the latter only counts runs, so a fuzzer that
+explores nothing reports a perfect score. (Getting there also needed
+`-print_final_stats=1`; without it the stats block is never printed and every
+field reads absent, which made the first version report "0 coverage units" on a
+run that was fine.)
+
+**Two mutants, and the surviving one is the result.** Removing
+`blockdev_read`'s `if (blockno >= d->nblocks)` **survived** 20000 runs — because
+there is a *second* bounds check in the same function, immediately before the
+memcpy: `if (off + len > (uint64_t)d->mem_size)`. The read path has **defence in
+depth**, and I only found out because a mutant I expected to die did not.
+Removing **both** is caught: `heap-buffer-overflow`, exit 1.
+
 ## M33 — making a leak visible, and what that immediately found (2026-10-15)
 
 M32 ended with a defect nothing could see: a leaked block is invisible because
