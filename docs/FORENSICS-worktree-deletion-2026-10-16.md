@@ -22,13 +22,48 @@ only the main repository — the worktree had been properly de-registered, not m
 
 | | 1st ~17:06 | 2nd ~20:02 | 3rd ~20:09 |
 |---|---|---|---|
-| What survived | `build/` only | **nothing** | nothing |
+| What survived | `build/` only | **nothing** | `build/Testing` only |
+| ctest logs survived | **yes** (found later) | no | yes |
 | Registry entry | gone | gone | never created; dir exists with no `.git` |
 | Co-occurring signal | `src/abi/v1/AROS/.git/worktrees/**wt_PRE**/` | `src/abi/v1/AROS/.git/worktrees/**wt_PRE3**/` | as 2nd |
 | Uncommitted work lost | none | none | **`CMakeLists.txt` + this file** |
 
 The differing signatures matter: the first left `build/` behind, the later ones removed
 the directory entirely. That is not one mechanism observed three times.
+
+### The first occurrence's own logs — found later, and they do NOT match the third
+
+When the third occurrence happened I preserved three `ctest` logs from it. Only afterwards,
+clearing the directory that survived the **first** occurrence, did I find that it had a
+`build/Testing/Temporary/` too — logs from **17:06**, an incident I had recorded without
+any artefact. Compared:
+
+```
+                        incident 1 (17:06)              incident 3 (20:09)
+LastTest.log            123 B, Start/End only           123 B, Start/End only
+LastTestsFailed.log     '53:all_gates'                  gates 28, 53, 54
+CTestCostData.txt       header only, 0 of 54 timings    (file did not survive)
+```
+
+The shared 123-byte `LastTest.log` made these look like one story. They are not, and the
+discriminator is `CTestCostData.txt`. Controls run to establish that:
+
+- A healthy `CTestCostData.txt` is **55 lines / 1729 bytes**, and it is **cumulative** —
+  it does not shrink between runs.
+- During a run it is already at full size, so ctest does not truncate it as it goes.
+- Incident 1's file is exactly `---\n`: a header written once, with **no test ever
+  recorded a timing line**.
+
+So in incident 1, ctest wrote its header and then recorded **no completed test at all** —
+the directory went while the very first test was in flight. In incident 3 the failure list
+is timestamped *before* `LastTest.log` and names the trailing gates, which is why that one
+can be placed at the end of a completed run.
+
+**Two occurrences that share an artefact's byte size are not thereby the same event.** The
+lesson is the one I had to learn twice this session and is worth stating once: a
+coincidentally identical signature (`123 bytes`) is not corroboration, and treating it as
+such would have produced a confident, tidy, wrong account of incident 1 — which is close
+to what I wrote in the wiki log about incident 3 before running the control at all.
 
 ### WHEN, exactly, in the third occurrence — and a claim I had to retract
 
