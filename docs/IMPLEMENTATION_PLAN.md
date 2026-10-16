@@ -1047,7 +1047,48 @@ file would have copied 1760 blocks 600 times. The version that ships walks the
 work as the bitmap read the caller was already doing, and it reuses the
 verifier's walk so there is exactly one definition of "referenced by the tree".
 
-### Rules M34
+### What mount_fuzz actually reported — and why that changes the next step
+
+The gate work was done and measured (m31, m32, m33, m13, m14 and m15 all went
+green with one rebuild line each), which left **one** gate red. I assumed, from
+its `write probe saw a failure` line, that the M34 refusal was arriving as the
+wrong errno and that `err_to_errno` needed a case for it. Mapping it to `EROFS`
+and teaching the gate to count it **did not clear it** — so the assumption was
+wrong, and the tool's own output says so:
+
+```
+strict iter 7:  wprobe: iter 71 op append: write landed wrong bytes: .../mnt/.wprobe/lrfcbw
+lenient iter 7: wprobe: iter 71 op append: write landed wrong bytes: ...
+lenient iter 18: wprobe: iter 71 op append: write landed wrong bytes: ...
+```
+
+**`write landed wrong bytes`, not a refusal.** With the rebuild in place the
+guard no longer fires, the write is accepted, and the data that comes back is
+not the data that went in. So the remaining blocker is not the guard's errno —
+it is that a rebuild followed by a write through the mount lands data in the
+wrong place on a volume the fuzzer has damaged with its own byte flips.
+
+Two things follow, and they are the same lesson:
+
+- **Read the failing tool's own output before believing the gate's summary
+  line.** The gate said "write probe saw a failure"; the probe said which write
+  and what happened. The summary line is a category, not a diagnosis, and a
+  cycle went into fixing the category.
+- **Do not keep adjusting a fix after it stops explaining the evidence.** The
+  `EROFS` change was made on a hypothesis I had not tested, it failed, and the
+  right move was to revert rather than stack a second adjustment on top.
+
+**So the order becomes:**
+
+1. **`bitmap-rebuild` on a damaged volume, then a write, lands wrong bytes.**
+   Reproduce with the mount and `iter 71 op append` in hand. The prime suspect
+   is the rebuild freeing a block that damage made unreachable — which is what a
+   rebuild is *defined* to do, so the real question is whether the subsequent
+   write can tell the volume is no longer sound. That is the same question M34's
+   guard asks, arriving from the other direction.
+2. Then the M34 guard, whose errno mapping this suggests is already right.
+
+Both are written and measured; they stay out of the tree while one gate is red.
 
 ### Rules M34
 
