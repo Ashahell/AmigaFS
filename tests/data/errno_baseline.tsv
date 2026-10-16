@@ -1,0 +1,69 @@
+dir.c	'{arg}' already exists	17
+file.c	'{arg}' is a directory	21
+dir.c	'{arg}' is not a directory	20
+dir.c	'{arg}' not found	2
+volume.c	DOS\\{arg} is not a supported AmigaDOS volume (only DOS\\0-DOS\\5; DOS\\6/DOS\\7 are AmigaOS 3.2 long-filename types)	22
+alloc.c	bad arguments	5
+alloc.c	bitmap block count {arg}, but a {arg}lock volume needs {arg}; the allocation map cannot be trusted	5
+alloc.c	bitmap extension chain not supported (volume too large)	27
+alloc.c	bitmap flagged invalid (bm_flag=0x{arg}); the volume needs its allocation map rebuilt before it can be written	5
+volume.c	block {arg} is not a T_HEADER/ST_ROOT rootblock	5
+file.c	block {arg} is not a plain file	5
+alloc.c	block {arg} is structural, cannot free	5
+alloc.c	block {arg} outside bitmap page	5
+alloc.c	block {arg} outside volume	5
+dir.c	cannot append cache record	5
+file.c	cannot delete links yet (only files/dirs)	95
+dir.c	cannot drop cache record	5
+file.c	cannot flush file header	5
+dir.c	cannot link cache block	95
+dir.c	cannot link into directory {arg}	95
+alloc.c	cannot mark bitmap invalid	5
+dir.c	cannot move a directory into itself	22
+dir.c	cannot move links yet (only files/dirs)	95
+volume.c	cannot open block device ({arg} bytes, bsize {arg})	5
+volume.c	cannot open image '{arg}'	5
+alloc.c	cannot read bitmap page	5
+dir.c	cannot read chain block {arg}	5
+file.c	cannot read data block {arg}	5
+dir.c	cannot read directory '{arg}'	5
+dir.c	cannot read directory block {arg}	5
+dir.c	cannot read directory {arg}	5
+dir.c	cannot read entry {arg}	5
+file.c	cannot read existing data blocks	5
+file.c	cannot read file data blocks	5
+file.c	cannot read file header {arg}	5
+alloc.c	cannot read rootblock	5
+volume.c	cannot read rootblock at {arg}	5
+dir.c	cannot relink cache chain	95
+dir.c	cannot relink chain in {arg}	95
+dir.c	cannot reread entry {arg}	5
+alloc.c	cannot revalidate bitmap	5
+dir.c	cannot rewrite entry {arg}	5
+alloc.c	cannot write bitmap page	5
+dir.c	cannot write cache block	5
+file.c	cannot write data block	5
+dir.c	cannot write directory block	5
+dir.c	cannot write directory {arg}	5
+file.c	cannot write file header	5
+file.c	cannot write file table	5
+dir.c	dir-cache chain corrupt	5
+dir.c	directory '{arg}' not empty	39
+dir.c	directory {arg} has no usable hash table	5
+dir.c	entry block {arg} outside volume	5
+file.c	extension chain corrupt	5
+file.c	file too large (past 4 GiB)	27
+dir.c	hash chain corrupt in directory {arg}	5
+dir.c	invalid name (1..30 bytes, no '/' or ':')	22
+volume.c	invalid partition window in '{arg}'	5
+volume.c	no DOS filesystem id on block 0 or block 1	5
+alloc.c	no bitmap page covers block {arg}	5
+alloc.c	out of memory	12
+volume.c	partition starts at block {arg} but the image holds {arg} blocks	5
+volume.c	partition window [{arg},{arg}) extends past the {arg}lock image	5
+volume.c	rootblock checksum invalid at block {arg}	5
+alloc.c	rootblock does not parse	5
+volume.c	rootblock parse failed	5
+alloc.c	the allocation map disagrees with the directory tree: block {arg} is referenced but marked free, so allocating from it would hand out a block that is in use. Rebuild the map first: afs bitmap-rebuild <image> --yes	5
+dir.c	unlink raced lookup (internal)	95
+alloc.c	volume full: no free block	28
