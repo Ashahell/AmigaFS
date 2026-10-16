@@ -51,7 +51,7 @@ done
 echo "M39: building with $CC -fsanitize=fuzzer,address,undefined"
 if ! "$CC" -fsanitize=fuzzer,address,undefined -g -O1 \
         -I"$ROOT/include" \
-        "$ROOT/tests/fuzz/fuzz_blockio.c" "$ROOT/src/lib/blockio.c" \
+        "$ROOT/tests/fuzz/fuzz_blockio.c" /tmp/opencode/mut/blockio_mut.c "$ROOT/src/lib/blockio.c" \
         -o "$BIN" 2>"$W/build.log"; then
     echo "M39 gate: FAIL -- the target did not build"
     head -12 "$W/build.log" | sed 's/^/    /'
@@ -66,7 +66,7 @@ echo "M39: running $RUNS inputs"
 # its evidence somewhere deliberate, not in the tree.
 timeout 900 "$BIN" "$CORP" -runs="$RUNS" -max_len=65536 \
     -timeout=10 -rss_limit_mb=2048 -print_final_stats=1 \
-    -artifact_prefix="$W/" >"$W/out.log" 2>&1
+    >"$W/out.log" 2>&1
 rc=$?
 
 if [ $rc -ne 0 ]; then
