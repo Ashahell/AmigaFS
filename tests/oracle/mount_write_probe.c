@@ -462,6 +462,35 @@ static void do_create(void) {
     } else if (fresh_name(dir, name, sizeof name) != 0) {
         return;
     }
+    /* The model must hold EXACTLY ONE slot per path, and alloc_ent is blind: it
+     * hands out a slot without asking whether the model already tracks the name
+     * we just generated. fresh_name() can collide with a live name, and the
+     * volume then holds ONE file while the model holds TWO slots for it -- one
+     * carrying the length this create just produced, one stale.
+     *
+     * random_file() picks among slots, so a later op can pick the stale one and
+     * act at the stale length while the mount correctly acts at the real end.
+     * The mount is then reported as corrupting data when it did exactly the
+     * right thing. Measured, ffdisk0049.adf, probe seed 17, 72 iterations:
+     * iter 35 created lrfcbw, iter 67 created it AGAIN at 374 bytes while the
+     * iter-35 slot still said 228, and iter 71's O_APPEND was compared at 228
+     * against a file the mount had grown to 374 and then to 507. Every byte the
+     * mount wrote was correct; only the probe's offset was wrong.
+     *
+     * The slot is reserved above, before anything is created, and that ordering
+     * is load-bearing (see the comment there) -- so drop the STALE slot rather
+     * than re-reserving, and let the reservation already held in `e` become the
+     * single tracker of this path. find_path() already exists and already
+     * answers exactly this question; nothing was calling it.
+     *
+     * alloc_ent leaves in_use == 0, so find_path cannot return `e` itself. */
+    {
+        struct ent *stale = find_path(rel);
+        if (stale && stale != e) {
+            free(stale->data);
+            memset(stale, 0, sizeof *stale);
+        }
+    }
     if (join_path(rel, sizeof rel, dir, name) != 0) return;
     path_of(full, sizeof full, dir, name);
     buf = malloc(len ? len : 1);
@@ -640,6 +669,24 @@ static void do_rename(void) {
         return;
     }
     expect_gone(e->dir, e->name);
+    /* A rename REPLACES its destination (POSIX), and fresh_name() can pick a
+     * name that is already live. When it does, the destination is destroyed and
+     * `e` now occupies its path -- but the destination's own model slot is
+     * still tracking that path, carrying the length of a file that no longer
+     * exists. A later op on that slot then compares against a stale length and
+     * reports the mount as wrong. Measured at iter 117 of the 250-iteration run
+     * on ffdisk0049.adf: "op rename: size mismatch: model 377, mount 162".
+     *
+     * Same defect class as do_create's collision, and the same remedy: the
+     * model must hold exactly one slot per path, so drop the clobbered one
+     * before `e` takes the path over. */
+    {
+        struct ent *clobbered = find_path(rel);
+        if (clobbered && clobbered != e) {
+            free(clobbered->data);
+            memset(clobbered, 0, sizeof *clobbered);
+        }
+    }
     if (setstr(e->dir, sizeof e->dir, dir) != 0 ||
         setstr(e->name, sizeof e->name, name) != 0 ||
         setstr(e->path, sizeof e->path, rel) != 0)
