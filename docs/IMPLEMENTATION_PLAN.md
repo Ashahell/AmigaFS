@@ -1709,6 +1709,53 @@ the gate rather than left for a user to discover.
 Note the same shape appears in the non-DIRC types (`-t 0`, `-t 1`, `-t 3`), where
 the rebuild is harmless and the gate applies it to all four so that "the rebuild
 is safe everywhere" is asserted rather than assumed.
+### The directory-GID width question is NOT decidable with the pinned toolchain
+
+The plan listed this as "a blocker for shipping `-o amiga_ids`" and prescribed a
+method: *"hex-dump a directory block from a MultiUser-formatted image,
+cross-checked against ADFlib's `bDirBlock` and amitools' dir-block layout."*
+
+**That method cannot work, and both cross-checks are empty.** Checked directly:
+
+- **ADFlib `AdfDirBlock`** (`src/adf_blk.h:266`) — the struct has `access`,
+  `days/mins/ticks`, `nameLen/dirName`, `real`, `nextLink`, `nextSameHash`,
+  `parent`, `extension`, `secType`. There is **no `uid` and no `gid` field at
+  all**. ADFlib does not model them anywhere, so it cannot confirm or refute a
+  width for a field it does not read.
+- **amitools `UserDirBlock`** — reads `own_key`, `protect`, `_read_nac_modts()`,
+  `hash_chain`, `parent`, `extension`, `hash_table`. Again **no `uid`, no
+  `gid`**. A grep for `uid` across the entire `amitools/fs/` tree returns
+  **zero** hits outside `uuid`/`guid`.
+- **`xdftool`** — its command list is `open create list type read makedir write
+  delete format bitmap blkdev protect comment time block pack unpack repack boot
+  root info relabel`. No `uid`, no `gid`, and `format` has **no MultiUser
+  option**, so no MultiUser volume can be produced with it either.
+
+So neither pinned oracle carries the field, and no available tool can create an
+image that would carry a non-zero one. **A byte-level dump could not settle it
+either**: a freshly written MultiUser directory has `GID == 0`, and four zero
+bytes and two zero bytes are the same sixteen bytes. Distinguishing the widths
+requires a volume with a non-zero GID, which means MultiUser-aware tooling that
+does not exist here.
+
+**What is settled is the decision, not the fact.** The reader exposes
+`uid = be16(bs - 196)` and `gid = be16(bs - 194)` (`src/lib/dir.c:1009-1010`) —
+both 16-bit, which is the conservative reading under either hypothesis: if the
+field really is `ushort`, it is exact; if it is really `ulong`, we return its low
+half and lose the high half rather than reading past it into whatever follows.
+`-o amiga_ids` stays **unoffered**, which is where it already was.
+
+The honest status is therefore not "unsettled" but **"unsettleable here, and the
+conservative exposure is in place."** Anyone who wants it settled needs the
+primary source — the `MultiUser` filesystem handler itself, or a genuine
+MultiUser-formatted image — which is outside what a pinned oracle pair can
+provide. Recording the impossibility is the deliverable; quietly widening the
+field to `be32` on the strength of the FAQ's internal inconsistency would be
+worse than leaving it 16-bit, because it would read a field the FAQ contradicts
+itself about and no oracle can check.
+
+**And the plan's instruction is corrected in place**, because leaving a
+prescribed method that cannot work is how the next session spends a day on it.
 ## M33 — making a leak visible, and what that immediately found (2026-10-15)
 
 M32 ended with a defect nothing could see: a leaked block is invisible because
@@ -2072,5 +2119,18 @@ Owner decisions, recorded. These are settled, not open.
   format. Needs another generator or a hand-built image.
 - **ADFlib RDB support is experimental:** see the M7 gate.
 - **Hostile images** (`ffdisk0049.adf`, fuzzed blocks): every pointer is bounds-checked, every chain is cycle-guarded, and nothing in the core aborts. Add a libFuzzer target over `blockio` with a memory backend after M4.
-- **Directory-block GID width (FAQ inconsistency):** the FAQ lists the file header's `GID` as `ushort` at `BSIZE-194`. The directory block lists `UID` as `ushort` at `BSIZE-196` but `GID` as `ulong` at `BSIZE-194`, a 4-byte field overlapping the 2-byte one before it. This is a spec error, not an established fact. Until it is settled, `-o amiga_ids` (D7) exposes directory GID as the 16-bit value and records the question. Settle it by hex-dumping a directory block from a MultiUser-formatted image, cross-checked against ADFlib's `bDirBlock` and amitools' dir-block layout. It was scheduled for M2, and M2 closed without settling it. It is now a **blocker for shipping `-o amiga_ids` in M8**: until it is closed, `amiga_ids` is not offered.
+- **Directory-block GID width — SETTLED AS UNSETTLEABLE HERE (M38).** The
+  prescribed method was impossible: **ADFlib's `AdfDirBlock` has no `uid` or
+  `gid` field at all** (`src/adf_blk.h:266`), **amitools' `UserDirBlock` does
+  not read them either** (zero `uid` hits across all of `amitools/fs/`), and
+  `xdftool` has no such command and no MultiUser `format` option. Neither
+  pinned oracle carries the field, and no tool here can make an image that
+  would. A dump could not settle it either: a fresh MultiUser directory has
+  `GID == 0`, and four zero bytes and two zero bytes are the same sixteen
+  bytes. What IS settled is the decision -- the reader keeps `be16` for both
+  (`src/lib/dir.c:1009-1010`), the conservative reading under either
+  hypothesis, and `-o amiga_ids` stays unoffered. Settling the fact needs the
+  MultiUser filesystem handler itself, or a genuine MultiUser-formatted
+  image. Do not re-attempt the cross-check: it is empty by construction.
+
 - **Large volumes:** a 32-bit block count with `BSIZE` up to 32 KiB stays in range. Refuse `ffstd64` explicitly.
