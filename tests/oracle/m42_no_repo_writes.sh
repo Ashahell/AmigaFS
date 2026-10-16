@@ -65,19 +65,20 @@ for g in "${SAMPLE[@]}"; do
         echo "  FAIL  $g does not parse"
         exit 1
     fi
-    # Run from a scratch cwd as well as checking afterwards: a gate that uses a
-    # RELATIVE path would then fail loudly instead of quietly writing into the
-    # repo. This is the half of the guard that prevents the problem rather than
-    # reporting it afterwards.
-    scratch=$(mktemp -d /tmp/amigafs-m42.XXXXXX)
-    ( cd "$scratch" && timeout 900 bash "$ROOT/$script" ) >/dev/null 2>&1
-    rc=$?
-    rm -rf "$scratch"
-    if [ $rc -ne 0 ]; then
-        echo "  note  $g exited $rc when run from a scratch cwd"
-        echo "        (its own runner re-runs it correctly; this gate only cares"
-        echo "         about the repository, and the check below is the verdict)"
-    fi
+    # Run from the REPOSITORY ROOT, deliberately. run_all_gates.sh invokes gates
+    # as `bash "$HERE/oracle/$g.sh"` with no cd, so they inherit the caller's cwd,
+    # which in practice is the repo root -- and that is exactly where `unadf`
+    # drops its extraction. An earlier version of this gate ran each gate from a
+    # scratch directory instead, which PREVENTED the debris rather than detecting
+    # it and left the digest check nearly vacuous: a gate that writes via an
+    # absolute or repo-relative path would still have been caught, but the common
+    # case (extract into cwd) could never trip it.
+    #
+    # Exit status is deliberately ignored. What is under test is the side effect
+    # on the repository, not whether the gate passes -- several of these exit
+    # non-zero when run out of band, and run_all_gates.sh is the thing that
+    # reports their verdicts.
+    ( cd "$ROOT" && timeout 900 bash "$script" ) >/dev/null 2>&1 || true
     ran=$((ran + 1))
 done
 
