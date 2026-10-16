@@ -1143,6 +1143,77 @@ neither keep nor reproduce** -- it is now both. This is the standing rule from
 M23 applied to a gate rather than a test: *never dismiss a flake without
 reproducing it*, and the first half of that is making reproduction possible.
 
+### Root cause found: the rebuild is what makes writes possible, and then the
+### mount write path over-commits blocks on a nearly-full volume
+
+With the gate now seeded, a sweep settled the attribution in one run.
+
+**1. The defect is not pre-existing and not the guard's.** Rebuilt the gate state
+twice and swept eight seeds each:
+
+| tree | seeds swept | result |
+|---|---|---|
+| guard OFF, no rebuild line | 1, 2, 3, 11, 42, 101, 999, 31337 | **8/8 PASS, clean** |
+| guard OFF, **rebuild line only** | the same eight | **8/8 FAIL**, `strict iter 7`, identical every seed |
+
+So the rebuild line alone is sufficient to cause it, and the guard is
+irrelevant. Every seed fails identically because the fixture is chosen by
+`SOURCES[$(( (i + 7) % n ))]` -- a function of `i` alone, not of `$RANDOM` --
+so iteration 7 is the same image in all eight runs.
+
+**2. The volume is not damaged.** `strict iter 7` is the lane the gate itself
+describes as "a healthy volume"; only the lenient lane flips bytes. So this is
+not a fuzz artefact: it is reproducible on an **untouched fixture**.
+
+**3. The fixture is `ffdisk0049.adf`, and the op is an append.** The CLI cannot
+reach this: it has no `append` verb at all (`put` overwrites), which is exactly
+why part 3's CLI probe came back clean three times. Any conclusion drawn from
+`afs put` about an append defect is a conclusion about a different program.
+
+**4. The rebuild's role: writes are impossible without it.** On the stale map,
+`create` fails with `EIO` before a single byte is written. That is why every
+write gate (m13, m14, m15, m31, m32, m33) needed the rebuild line -- and it
+means the rebuild is load-bearing for the entire write path, not a convenience.
+
+**5. The failure is a size/allocation disagreement on a nearly-full volume.**
+`ffdisk0049.adf` reports **40 free blocks**. Reproduced outside the fuzzer by
+appending growing chunks through a real mount:
+
+```
+append@4097   ok        (model  11354, mount  11354)
+append@8193   WRITE FAILED
+STOP at append@8193: model=19547 mount=18522
+```
+
+The file had 11354 bytes (22 blocks) and the volume had 40 free. The write asked
+for 8193 more and **committed 7168 bytes (14 blocks) before reporting failure**.
+With ~3 blocks actually free, 14 cannot be allocated. The file's size and its
+allocated blocks therefore disagree, and a later read of the tail returns data
+that is not the file's -- which is precisely `write landed wrong bytes`, and
+precisely why the probe saw the write **succeed** while the bytes were wrong.
+
+**6. What was refuted along the way, by measurement:**
+
+- *The rebuild frees blocks belonging to live files.* Snapshotted all **77**
+  files, rebuilt, re-snapshotted, then `put` a new 64-byte file and
+  re-snapshotted: **0 files changed by the rebuild, 0 clobbered by the write.**
+  So the rebuild's walk does reach the live tree; it is not poaching.
+- *The fuzzer's damage.* Refuted by point 2 -- the strict lane never damages.
+- *The M34 guard's errno.* Refuted by point 1 -- the rebuild alone reproduces it.
+- *The CLI write path.* Refuted by point 3 -- it cannot express an append.
+
+**So the remaining work is one defect, and it is not the M34 guard:** the mount
+write path must not let a write commit more blocks than the volume has free,
+and must not leave a file whose recorded size exceeds its allocated blocks.
+ENOSPC has to surface as a short write or an error with the size rolled back --
+never as a successful `write()` whose bytes are not there. The M34 guard is
+still correct and still worth shipping, but it is guarding a *different*
+failure and must not be held hostage to this one.
+
+Also fixed here: `mount_fuzz.sh` declared `lane_no=0` at the top and never
+incremented it, so both lanes received the same seed while the comment claimed
+per-lane seeding. It is now derived per iteration from the lane name.
+
 ### Rules M34
 
 - **M34.1 — A self-consistent map is not an accurate map.** The two guards

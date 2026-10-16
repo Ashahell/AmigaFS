@@ -318,6 +318,10 @@ for lane in strict lenient; do
         # $RANDOM is re-seeded per lane rather than per iteration, because the
         # lanes interleave and a per-iteration reseed would make iteration N
         # depend on which lane got there first.
+        # lane_no is derived HERE, per iteration, not declared once at the top:
+        # the original form declared it and never incremented it, so both lanes
+        # got the same seed while the comment above claimed per-lane seeding.
+        lane_no=0; [ "$lane" = lenient ] && lane_no=1
         RANDOM=$(( (SEED_BASE + i * 31 + lane_no) % 32768 ))
         src="${SOURCES[$(( (i + 7) % ${#SOURCES[@]} ))]}"
         cp "$src" "$IMG" 2>/dev/null || continue
