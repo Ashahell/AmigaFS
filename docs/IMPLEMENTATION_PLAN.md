@@ -937,6 +937,44 @@ versions pass straight over it.
 
 ## M34 — second-large-write corruption: root cause found, fix awaiting a decision (2026-10-15)
 
+> **RESOLVED 2026-10-16 — shipped in `a3db7283`.** The decision below (refuse, with
+> the remedy named) is what shipped. The guard is
+> `afs_verify_map_disagrees()` wired into `afs_alloc_block`: the map must agree
+> with the **tree**, not merely with itself, and it walks via `visit_entry`
+> rather than copying the volume, because it sits in the allocation path.
+>
+> **Why it took fourteen parts, and which of the sections below are wrong.** One
+> gate (`mount_fuzz`) stayed red for the entire time, and it was red because of a
+> bug in `mount_write_probe`, not because of anything the guard does. The
+> sections are in the order they were written and several are *refuted* by later
+> ones — kept because the corrections are the record:
+>
+> - "What mount_fuzz actually reported" — the first reading of the failure. The
+>   errno hypothesis was wrong.
+> - "Root cause found: … over-commits blocks on a nearly-full volume" — **WRONG.**
+>   Corrected immediately below it; `dd`'s default `bs=512` split one append
+>   into sixteen writes, so "7168 bytes committed" was a fact about `dd`.
+> - "Down to the bytes: the file's recorded geometry does not match the write" —
+>   **WRONG.** The geometry checker written to test it found the file internally
+>   consistent, and the hypothesis with it.
+> - "A new finding: `bitmap-rebuild` leaves live blocks marked free on g1a30c" —
+>   **WRONG.** The rebuild had *refused*; its output had been sent to
+>   `/dev/null` and assumed to have succeeded.
+> - The sections that survive: the gate had **no seed** (so nothing in it could
+>   be reproduced), and **`bitmap-rebuild` refused on `g1a30c` naming a remedy
+>   that no command could perform** — which made that volume permanently
+>   unwritable, since a stale map is exactly what refuses writes. That one is
+>   fixed and pinned (`d455d564`, `d634fc39`).
+>
+> **The actual blocker, for anyone reading the failed sections:** the probe's
+> `do_create` reserved its model slot with a blind `alloc_ent()` and then
+> generated a name that could collide with a live one, leaving **two model slots
+> tracking one path**. `random_file()` picks among slots, so an op acted on the
+> stale one at a length the mount never had, while the mount correctly appended
+> at the real end. Every byte the mount wrote was right; the probe's offset was
+> wrong. Two compounding lessons are recorded in the wiki — a fix can appear to
+> work because it perturbed the RNG, and an invariant that nothing enforces is an
+> assumption.
 **Status: DIAGNOSED, NOT SHIPPED.** Both candidate fixes were implemented and
 measured; the tree is reverted to the M33 baseline (30/30 gates, 45/45 ctest)
 pending a decision recorded below. The diagnosis is the durable part.
