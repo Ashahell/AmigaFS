@@ -51,7 +51,7 @@ done
 echo "M39: building with $CC -fsanitize=fuzzer,address,undefined"
 if ! "$CC" -fsanitize=fuzzer,address,undefined -g -O1 \
         -I"$ROOT/include" \
-        /tmp/opencode/mut/blockio_mut.c "$ROOT/src/lib/blockio.c" \
+        "$ROOT/tests/fuzz/fuzz_blockio.c" /tmp/opencode/mut/blockio_mut.c \
         -o "$BIN" 2>"$W/build.log"; then
     echo "M39 gate: FAIL -- the target did not build"
     head -12 "$W/build.log" | sed 's/^/    /'
