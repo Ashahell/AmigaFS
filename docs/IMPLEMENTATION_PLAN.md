@@ -1438,6 +1438,94 @@ post-failure image only, the write path corrupts a file's geometry and the
 library test that passes in isolation is missing the precondition -- the
 directory churn. If it fires on a fixture too, there is a standing geometry bug
 that no gate looks for.
+### A geometry checker, and part 8's hypothesis is refuted
+
+I wrote the checker part 8 asked for. It walks every file in the tree and
+asserts, without a mount, a write, or the oracle:
+
+- `header.size` equals the sum of `data_size` over the file's OFS chain;
+- the chain length equals `ceil(size / payload)`;
+- each data block's `next` pointer equals the following table entry;
+- every block in the chain is marked used in the bitmap.
+
+Committed as `tests/oracle/geomcheck.c`. **Its own two bugs are worth
+recording**, because both produced confident nonsense first:
+
+- it walked the chain from the **last** table entry instead of the first, so
+  every multi-block file was short by exactly its first block;
+- it indexed past `entries` for files needing **extension blocks**, reading
+  *before* the header. That accounted for most of its first run's 83 "failures".
+
+Multi-table files are now **skipped and counted**, not mis-read — re-deriving
+the extension-block walk here would be a second copy of a library invariant,
+which is the mistake `llm-wiki` already records for readers.
+
+**The checker refutes part 8.** The post-failure image is geometrically
+perfect:
+
+```
+85 files checked, 7 skipped, 13 directories, 0 disagreements -> PASS
+```
+
+`.wprobe/lrfcbw` is **internally consistent at 507 bytes** — `data_size` 488 +
+19, `next` chain intact, both blocks used. So the file was never malformed. The
+size/table/data disagreement part 8 built its next step on **is not there**, and
+the write path did not corrupt a file's geometry. Part 8's proposed next step
+was itself the thing that disproved it, which is the outcome worth wanting.
+
+**And 9 of 10 fixtures are geometrically clean after a rebuild.** Their first
+run "failures" were all one class — `data block N is marked FREE` — which is the
+documented stale-map condition of every fixture, not a geometry violation. Once
+that class is separated out:
+
+```
+after bitmap-rebuild, geometry only:
+  arccsh blank ffdisk0049 links testffs testhd test_link_chains
+  testofs win32-names                     -> 0 disagreements
+  g1a30c                                 -> 10 disagreements
+```
+
+### A new finding: `bitmap-rebuild` leaves live blocks marked free on g1a30c
+
+All ten of `g1a30c`'s are the *same* class, and that is the point — **they
+survive the rebuild**:
+
+```
+BAD /c/TYPE:         data blocks 967, 968, 969, 970 marked FREE
+BAD /c/Hola:         data block 972 marked FREE
+BAD /l/Ram-Handler:  data blocks 1068, 1069, 1070, 1086, 1087 marked FREE
+```
+
+Those files are **in the listing** — `/c/Hola` and `/l/Ram-Handler` both appear
+as `f1` — so the tree walk reaches them, and the geometry checker reads their
+data tables and finds block 972 in `/c/Hola`'s table. Yet after the rebuild the
+bitmap says that block is free.
+
+**This is exactly the hazard the M34 guard exists for**: the map marks free a
+block the tree references. It is also the corruption mechanism `mount_fuzz` has
+been pointing at all along — a write allocates a block that is live.
+
+It is **not currently exploitable on `g1a30c`**: a `put` after the rebuild is
+**REFUSED**, so the allocator never gets that far on that volume. That is worth
+stating precisely rather than as "fixed" — the map disagrees, and something
+else happens to stop the write first. Which something is the open question, and
+it is a good one: a refusal that is not the M34 guard is a refusal from
+somewhere the M34 guard would not have needed to be.
+
+**Two things to do, in order:**
+
+1. **Work out why `g1a30c` differs.** It has no soft links (22 `f1`, 6 `d1`, no
+   softlink kinds), so the obvious M31-shaped explanation is out. What
+   distinguishes it: 998 orphans — by far the most fragmented volume in the set.
+   Rebuild its map and watch which walk path skips `/c/Hola`'s data blocks.
+2. **Then land the M34 guard**, which is now clearly worth having: it is not
+   guarding an edge case, it is guarding the state this fixture is permanently
+   in.
+
+`geomcheck.c` is committed but **not yet wired as a gate** — `run_all_gates.sh`
+and `CMakeLists.txt` must name the same gates, and that pairing is verified
+together rather than in one place. Wiring it, scoped to geometry only, is the
+follow-up.
 ### Rules M34
 
 - **M34.1 — A self-consistent map is not an accurate map.** The two guards
