@@ -1214,6 +1214,94 @@ Also fixed here: `mount_fuzz.sh` declared `lane_no=0` at the top and never
 incremented it, so both lanes received the same seed while the comment claimed
 per-lane seeding. It is now derived per iteration from the lane name.
 
+### CORRECTION to part 5: the over-commit claim was mine, and it was wrong
+
+Part 5 concluded "the mount write path over-commits blocks on a nearly-full
+volume", on the strength of this:
+
+```
+append@4097   ok        (model  11354, mount  11354)
+append@8193   WRITE FAILED
+STOP at append@8193: model=19547 mount=18522
+```
+
+**That measurement was an artefact of my own test.** `dd`'s default `bs=512`
+splits an 8193-byte append into **16 separate 512-byte `write()` calls**. Each
+one succeeds until the volume fills, so the file grows normally and only the
+last write fails — which is ordinary ENOSPC, not a write that committed more
+than it should. The file grew by exactly 14 × 512 = 7168, i.e. 14 writes landed
+and the 15th hit the wall. "7168 bytes committed before failure" was never a
+fact about the library; it was a fact about `dd`.
+
+The library is in fact built the other way on purpose. `afs_file_write_range`
+allocates its whole deficit **before writing anything** —
+
+```c
+/* deficit first: the volume is still exactly as it was until these all
+ * succeed, so a full volume leaves the file untouched */
+```
+
+— so a single call that cannot fit commits nothing. The comment states the
+invariant and the code honours it.
+
+Re-run with **one write per append** (`bs=$sz count=1`), which is what the probe
+actually does, the picture is different again and is *not* the probe's symptom
+either: one 8193-byte write committed 934 bytes and then failed. That is a
+short write reported as an error rather than as a byte count — a real POSIX
+wart worth its own record, but **not** `write landed wrong bytes`, which
+requires the write to have fully succeeded.
+
+Recording this rather than quietly restating the number: the direction was
+right (the defect is in the mount write path, and the rebuild is what makes
+writes possible at all) but the mechanism was wrong, and I drew it from a test
+that could not have produced the evidence it appeared to give.
+
+### A faithful, deterministic reproduction
+
+Two facts made this cheap, and both were sitting in the probe:
+
+- `WPROBE_TRACE=1` narrates every operation, with the file and the model's
+  length at that moment.
+- The gate calls the probe with a **fixed seed** — `mount_write_probe $MNT
+  250 17` — so the whole op sequence is deterministic. The earlier flakiness was
+  entirely in the *damage* lane; the probe itself was always replayable.
+
+Rebuilding `ffdisk0049.adf`, mounting it rw, and running the probe with the
+gate's own arguments reproduces it exactly, every time:
+
+```
+wprobe: iter 71 op append: write landed wrong bytes: .../.wprobe/lrfcbw
+TRACE iter 35 create .../lrfcbw
+TRACE iter 67 create .../lrfcbw
+TRACE iter 71 append .../lrfcbw (model len 228)
+```
+
+**What this rules out, each by evidence rather than by plausibility:**
+
+- **Not ENOSPC.** The file is **228 bytes** — one data block against a 488-byte
+  OFS payload. The append needs at most one more block. Nothing is near a
+  capacity boundary here.
+- **Not a stale probe model.** `do_create` opens `O_RDWR|O_CREAT|O_TRUNC` and
+  then calls `reload(e)`, adopting the mount's reported length, with the
+  comment *"Whatever the mount reports is the truth."* So the model saying 228
+  at iter 71 is the mount's own answer, not drift. (I had first suspected the
+  iter-67 create truncating a live file; `reload` kills that.)
+- **Not the rebuild poaching live blocks.** All 77 pre-existing files are
+  byte-identical after a rebuild and a 64-byte put.
+
+**So the defect is narrow and specific:** a successful `O_APPEND` that extends a
+one-block file to two blocks writes the bytes somewhere other than where the
+append must land — or the read-back of them does. Both halves are now
+replayable in a single command, which is the precondition part 2 lacked and
+part 4 supplied.
+
+The next step follows directly: instrument `afs_file_write_range` for the
+two-block case — log `old_n`, `new_n`, `keep`, `need_data`, the allocated
+blocks, and the data block's `next` pointer and `data_size` — and check the two
+things a 1→2 block append must get right: that block 1 is really allocated and
+really written, and that block 0's `next` points at it. `m13_write.sh` covers
+growth, but on volumes with free blocks to spare; `ffdisk0049.adf`'s 40 free
+blocks are the distinguishing condition and no existing gate uses it.
 ### Rules M34
 
 - **M34.1 — A self-consistent map is not an accurate map.** The two guards
