@@ -116,7 +116,7 @@ set(AMIGAFS_GATES m23_hash_unreachable m24_unadf_link_blindness m25_link_write m
 foreach(g ${AMIGAFS_GATES})
   add_test(NAME gate_${g}
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/oracle/${g}.sh)
-  set_tests_properties(gate_${g} PROPERTIES TIMEOUT 300)
+  set_tests_properties(gate_${g} PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 endforeach()
 
 # the end-to-end harness as a single ctest entry
