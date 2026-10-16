@@ -66,7 +66,7 @@ echo "M39: running $RUNS inputs"
 # its evidence somewhere deliberate, not in the tree.
 timeout 900 "$BIN" "$CORP" -runs="$RUNS" -max_len=65536 \
     -timeout=10 -rss_limit_mb=2048 -print_final_stats=1 \
-    -artifact_prefix="$W/" >"$W/out.log" 2>&1
+    >"$W/out.log" 2>&1
 rc=$?
 
 if [ $rc -ne 0 ]; then
