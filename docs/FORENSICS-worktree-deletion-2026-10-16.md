@@ -69,7 +69,23 @@ to what I wrote in the wiki log about incident 3 before running the control at a
 
 Three `ctest` logs survived the third deletion inside `build/Testing/Temporary/`. Their
 **mtimes are the evidence**, and they corrected an inference I published before checking
-them:
+them.
+
+> **THE ARTEFACTS BELOW NO LONGER EXIST.** I preserved them, then destroyed them: clearing
+> the directory that survived the *first* deletion, I copied its logs into the same
+> preservation directory with `cp -a .../*.log`, the filenames collided, and incident 3's
+> originals were overwritten. Searched afterwards — nothing stamped 20:09 survives
+> anywhere. What follows is therefore **my record of files I read, not files you can
+> check**, which is the state this document exists to avoid.
+>
+> The first occurrence's logs *do* survive, and are preserved durably in the project's
+> wiki at `llm-wiki/raw/articles/2026-10-16-worktree-deletion-1-ctest-logs.md` — which is
+> where the comparative table in the next section is now sourced. A reader should trust
+> that raw record over this one.
+>
+> **Preserving an artefact and then destroying it are not opposites; the second silently
+> undoes the first.** A copy into a directory that already holds evidence needs
+> collision-proof names, or it is not a preservation at all.
 
 ```
 LastTestsFailed.log   20:09:42   names gates 28, 53, 54   <- the last three of 54
