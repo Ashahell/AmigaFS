@@ -81,13 +81,18 @@ count_orphans() { "$AFS" verify "$1" --orphans 2>&1 | sed -n 's/.*: \([0-9][0-9]
 
 IMG="$WORK/t.adf"
 cp "$FIXTURE" "$IMG"
+# A stale map is what refuses writes; a fresh one is the starting point.
+"$AFS" bitmap-rebuild "$IMG" --yes >/dev/null 2>&1 || true
 base=$(count_orphans "$IMG")
 [ -n "$base" ] && [ "$base" -gt 0 ] \
     && pass "the fixture reports $base orphans under --orphans (baseline)" \
     || fail "no baseline orphan count on the fixture"
 
 printf 'hello' > "$WORK/small.bin"
-cp "$FIXTURE" "$IMG"; "$AFS" put "$IMG" /t.bin "$WORK/small.bin" >/dev/null
+cp "$FIXTURE" "$IMG"
+# A stale map is what refuses writes; a fresh one is the starting point.
+"$AFS" bitmap-rebuild "$IMG" --yes >/dev/null 2>&1 || true
+"$AFS" put "$IMG" /t.bin "$WORK/small.bin" >/dev/null
 small=$(count_orphans "$IMG")
 [ "$small" = "$base" ] \
     && pass "writing a 1-data-block file adds NO orphans ($small == $base)" \
@@ -95,7 +100,10 @@ small=$(count_orphans "$IMG")
 
 # 3000 bytes = 6 data blocks, the case the old walk missed entirely
 head -c 3000 /dev/urandom > "$WORK/big.bin"
-cp "$FIXTURE" "$IMG"; "$AFS" put "$IMG" /t.bin "$WORK/big.bin" >/dev/null
+cp "$FIXTURE" "$IMG"
+# A stale map is what refuses writes; a fresh one is the starting point.
+"$AFS" bitmap-rebuild "$IMG" --yes >/dev/null 2>&1 || true
+"$AFS" put "$IMG" /t.bin "$WORK/big.bin" >/dev/null
 big=$(count_orphans "$IMG")
 [ "$big" = "$base" ] \
     && pass "writing a 6-data-block file adds NO orphans ($big == $base)" \
@@ -103,6 +111,8 @@ big=$(count_orphans "$IMG")
 
 # a link also must not leak
 cp "$FIXTURE" "$IMG"
+# A stale map is what refuses writes; a fresh one is the starting point.
+"$AFS" bitmap-rebuild "$IMG" --yes >/dev/null 2>&1 || true
 "$AFS" link "$IMG" /secret.S l1 >/dev/null 2>&1 || true
 lbase=$(count_orphans "$IMG")
 "$AFS" rm "$IMG" /l1 >/dev/null 2>&1 || true
@@ -137,6 +147,8 @@ lafter=$(count_orphans "$IMG")
 # the two-write case recorded rather than asserted.
 ONE="$WORK/one.adf"
 cp "$FIXTURE" "$ONE"
+# A stale map is what refuses writes; a fresh one is the starting point.
+"$AFS" bitmap-rebuild "$ONE" --yes >/dev/null 2>&1 || true
 head -c 300000 /dev/urandom > "$WORK/fill.bin"
 "$AFS" put "$ONE" /big.bin "$WORK/fill.bin" >/dev/null 2>&1
 "$AFS" verify "$ONE" >/dev/null 2>&1 \

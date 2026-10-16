@@ -61,6 +61,9 @@ printf 'hello amiga\n' > "$WORK/small.txt"
 # ---- 1. put + mkdir on OFS and FFS, read back via ADFlib -------------------
 for img in blank.adf testffs.adf testofs.adf; do
     cp "$ROOT/tests/fixtures/$img" "$WORK/w.adf"
+    # A stale map is what refuses writes, so every case starts from a
+    # fresh one. Same remedy in every writing gate.
+    "$BIN/afs" bitmap-rebuild "$WORK/w.adf" --yes >/dev/null 2>&1 || true
     if ! "$BIN/afs" mkdir "$WORK/w.adf" NDIR >/dev/null 2>&1; then
         bad "mkdir $img"; continue
     fi
@@ -113,6 +116,9 @@ done
 # (it refuses testffs.adf/links.adf outright -- amitools cannot parse hardlink
 # blocks -- and g1a30c.adf for its bitmap mismatch; probed, not assumed).
 cp "$ROOT/tests/fixtures/blank.adf" "$WORK/x.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/x.adf" --yes >/dev/null 2>&1 || true
 if xdftool "$WORK/x.adf" makedir XDIR >/dev/null 2>&1 \
    && xdftool "$WORK/x.adf" write "$WORK/small.txt" XDIR/hello >/dev/null 2>&1; then
     a=$(sha256sum < "$WORK/small.txt" | cut -d' ' -f1)
@@ -143,6 +149,9 @@ fi
 N1=$(printf 'caf\xe9'); N2=$(printf 'CAF\xc9')
 printf 'first\n' > "$WORK/first.txt"; printf 'second\n' > "$WORK/second.txt"
 cp "$ROOT/tests/fixtures/testofs.adf" "$WORK/case.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/case.adf" --yes >/dev/null 2>&1 || true
 if "$BIN/afs" put "$WORK/case.adf" "$N1" "$WORK/first.txt" >/dev/null 2>&1 \
    && "$BIN/afs" put "$WORK/case.adf" "$N2" "$WORK/second.txt" >/dev/null 2>&1; then
     n=$("$BIN/afs" ls "$WORK/case.adf" 2>/dev/null | grep -c "caf")
@@ -157,6 +166,9 @@ else
     bad "INTL truncate resolves folding" "put failed"
 fi
 cp "$ROOT/tests/fixtures/blank.adf" "$WORK/case2.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/case2.adf" --yes >/dev/null 2>&1 || true
 if "$BIN/afs" put "$WORK/case2.adf" "$N1" "$WORK/first.txt" >/dev/null 2>&1 \
    && "$BIN/afs" put "$WORK/case2.adf" "$N2" "$WORK/second.txt" >/dev/null 2>&1; then
     n=$("$BIN/afs" ls "$WORK/case2.adf" 2>/dev/null | grep -c "caf\|CAF")
@@ -175,6 +187,9 @@ fi
 # duplicates at the library level, but the CLI's job is cp-like, not
 # adfFileOpen-"w"-like -- assert the truncation, not the refusal.
 cp "$ROOT/tests/fixtures/testffs.adf" "$WORK/n.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/n.adf" --yes >/dev/null 2>&1 || true
 "$BIN/afs" mkdir "$WORK/n.adf" NDIR >/dev/null 2>&1
 "$BIN/afs" put "$WORK/n.adf" NDIR/f "$WORK/small.txt" >/dev/null 2>&1
 printf '0123456789abcdef0123456789abcdef' > "$WORK/mid32.txt"
@@ -234,6 +249,15 @@ fi
 
 # ---- 4. RDB: write one partition, others byte-identical ---------------------
 cp "$ROOT/tests/fixtures/a590_WD93028XA_6parts.hdd" "$WORK/r.hdd"
+# An RDB image is six PARTITIONS, each with its own bitmap, and a stale one
+# refuses writes -- so every partition is rebuilt, named explicitly. A
+# whole-image rebuild would treat the RDB block itself as volume data.
+for p in OFS "OFS INTL" "OFS DirCache" FFS "FFS INTL" "FFS DirCache"; do
+    "$BIN/afs" bitmap-rebuild "$WORK/r.hdd" "$p" --yes >/dev/null 2>&1 || true
+done
+
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
 before=$(for p in OFS "OFS INTL" "OFS DirCache" FFS "FFS INTL" "FFS DirCache"; do "$BIN/afs" cat "$WORK/r.hdd" "$p/Trashcan.info" 2>/dev/null | sha256sum | cut -d' ' -f1; done)
 if "$BIN/afs" mkdir "$WORK/r.hdd" "FFS/NEWDIR" >/dev/null 2>&1 \
    && "$BIN/afs" put "$WORK/r.hdd" "FFS/NEWDIR/payload" "$WORK/small.txt" >/dev/null 2>&1; then
@@ -277,6 +301,9 @@ fi
 # ---- 5. mount the written copy: written bytes must be mount-readable --------
 # Self-contained: fresh copy + own writes, no reliance on section 1 leftovers.
 cp "$ROOT/tests/fixtures/testofs.adf" "$WORK/w.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/w.adf" --yes >/dev/null 2>&1 || true
 "$BIN/afs" mkdir "$WORK/w.adf" NDIR >/dev/null 2>&1
 "$BIN/afs" put "$WORK/w.adf" NDIR/big "$WORK/big.bin" >/dev/null 2>&1
 mkdir -p "$WORK/mnt"

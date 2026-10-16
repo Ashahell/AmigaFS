@@ -602,6 +602,67 @@ static void test_the_base_volume_has_a_readable_map(void) {
     free(img);
 }
 
+/* M34: the allocator must REFUSE when the map marks free a block the tree
+ * references, because that is the state in which it hands out a block already in
+ * use -- silent data loss, not a crash.
+ *
+ * The volume is built and a real file written, so the tree genuinely references
+ * the file's header. Marking that header FREE in the map is the smallest
+ * possible disagreement, and it is exactly the state every fixture in the repo
+ * is in (their maps are all stale), which is why the write gates need a rebuild
+ * line rather than a workaround.
+ *
+ * The second half is the part that matters most: the refusal names a remedy, and
+ * the test RUNS the remedy and shows the refusal clearing. A refusal naming a
+ * missing remedy is worse than no refusal, because it sends the user to do a
+ * thing they cannot do -- which is exactly how bitmap-rebuild used to behave on
+ * g1a30c (part 11). */
+static void test_alloc_refuses_when_the_map_disagrees_with_the_tree(void) {
+    uint8_t *img = build_writable_img_free(IMG_BLOCKS - 8);
+    afs_volume_t *v = NULL;
+    char err[256] = {0};
+    uint32_t hdr = 0, got = 0xFFFFFFFFu;
+    uint8_t map[512];
+
+    CHECK(img != NULL, "image allocated");
+    CHECK_EQ_U(afs_volume_open_memory(img, (size_t)IMG_BLOCKS * 512, 512,
+                                      &v, NULL, 0), 0, "volume opens");
+    if (!v) return;
+
+    CHECK_EQ_U(afs_file_create(v, IMG_ROOT, "big", 3, &hdr, NULL, 0), 0,
+               "create succeeds");
+    uint8_t body[900];
+    for (size_t i = 0; i < sizeof body; i++) body[i] = (uint8_t)(i * 5u + 3u);
+    CHECK_EQ_U(afs_file_write_all(v, hdr, body, sizeof body, NULL, 0), 0,
+               "write succeeds while the map still agrees");
+
+    /* now corrupt the map: the file's HEADER is referenced by the tree, so
+     * marking it FREE is a disagreement */
+    memset(map, 0, sizeof map);
+    for (uint32_t i = 0; i < IMG_BLOCKS; i++)
+        if (i != 0 && i != 1 && i != IMG_ROOT && i != IMG_BM && i != hdr)
+            afs_bitmap_set(map, i);
+    uint8_t *bm = img + (size_t)IMG_BM * 512;
+    memset(bm, 0, 512);
+    memcpy(bm + 4, map, 508);
+    put_be32(bm + 0, afs_block_checksum(bm, 512, 0));
+
+    CHECK(afs_alloc_block(v, &got, err, sizeof err) != 0,
+          "allocation REFUSES when the map marks a referenced block free");
+    CHECK(strstr(err, "bitmap-rebuild") != NULL,
+          "  ...and the message names the remedy (%s)", err);
+    CHECK_EQ_U(got, 0xFFFFFFFFu, "  ...and hands back no block");
+
+    /* and the named remedy actually clears the refusal */
+    afs_bitmap_rebuild_stats_t st;
+    CHECK_EQ_U(afs_bitmap_rebuild(v, &st, err, sizeof err), 0,
+               "the named remedy runs clean (%s)", err);
+    got = 0xFFFFFFFFu;
+    CHECK_EQ_U(afs_alloc_block(v, &got, err, sizeof err), 0,
+               "after the remedy, allocation succeeds again (%s)", err);
+    CHECK(got != hdr, "  ...and does not hand back the file's header");
+}
+
 int main(void) {
     printf("alloc/write\n");
     test_the_base_volume_has_a_readable_map();
@@ -615,6 +676,7 @@ int main(void) {
     test_delete_file_frees_blocks();
     test_rmdir_and_refusals();
     test_rename_within_and_across();
+    test_alloc_refuses_when_the_map_disagrees_with_the_tree();
     test_write_range_span();
     test_write_range_zero_gap();
     test_enospc_leaves_content_intact();

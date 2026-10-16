@@ -496,3 +496,56 @@ int afs_verify_memory(const uint8_t *img, size_t size, size_t bsize,
                       afs_verify_report_t *out, int max) {
     return afs_verify_memory_ex(img, size, bsize, out, max, 0);
 }
+
+
+int afs_verify_map_disagrees(afs_volume_t *v, uint32_t *block_out) {
+    /* Does the map mark FREE a block the tree references? That is the state in
+     * which the allocator hands out a block already in use.
+     *
+     * The first version copied the whole volume into a buffer and called
+     * afs_verify_memory_ex. This sits in afs_alloc_block, so writing a 600-block
+     * file would have copied 1760 blocks 600 times. This walks the volume
+     * directly -- visit_entry already takes an afs_volume_t and reads only the
+     * blocks the tree reaches -- so the cost is one pass over the TREE per
+     * allocation, the same order as the bitmap read the caller already does.
+     *
+     * Reuses visit_entry/visit_dir_raw, so there is exactly ONE definition of
+     * "referenced by the tree". A second copy could disagree with the verifier,
+     * and the verifier is what users are told to trust. */
+    uint32_t nblocks, root, bad = 0;
+    visit_ctx_t vc;
+    afs_verify_report_t rep[1];
+    int n = 0, found = 0;
+    uint8_t *map;
+    size_t mapbytes;
+
+    if (!v) return 0;
+    nblocks = afs_volume_block_count(v);
+    mapbytes = ((size_t)nblocks + 7u) / 8u;
+    map = malloc(mapbytes ? mapbytes : 1);
+    if (!map) return 1;                      /* cannot check -> treat as bad */
+    if (afs_bitmap_read(v, map, mapbytes) <= 0) { free(map); return 1; }
+
+    vc.marks = calloc(nblocks, 1);
+    vc.nblocks = nblocks;
+    vc.max = 1;
+    if (!vc.marks) { free(map); return 1; }
+
+    root = afs_volume_rootblock(v);
+    visit_entry(v, root, &vc, 0, rep, &n, 1);
+    verify_all_dircaches(v, vc.marks, rep, &n, 1);
+    {   /* bitmap pages are storage and belong in the same referenced set */
+        const afs_rootblock_t *rb = afs_volume_root(v);
+        for (int i = 0; i < 25 && rb->bm_pages[i]; i++) {
+            uint32_t bp = rb->bm_pages[i];
+            if (bp < nblocks && !vc.marks[bp]) vc.marks[bp] = 1;
+        }
+    }
+    for (uint32_t b = 2; b < nblocks; b++)
+        if (vc.marks[b] && afs_bitmap_test(map, b)) { bad = b; found = 1; break; }
+
+    free(vc.marks);
+    free(map);
+    if (found && block_out) *block_out = bad;
+    return found;
+}

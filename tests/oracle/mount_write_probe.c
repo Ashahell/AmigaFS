@@ -462,6 +462,7 @@ static void do_create(void) {
     } else if (fresh_name(dir, name, sizeof name) != 0) {
         return;
     }
+    if (join_path(rel, sizeof rel, dir, name) != 0) return;
     /* The model must hold EXACTLY ONE slot per path, and alloc_ent is blind: it
      * hands out a slot without asking whether the model already tracks the name
      * we just generated. fresh_name() can collide with a live name, and the
@@ -477,13 +478,21 @@ static void do_create(void) {
      * against a file the mount had grown to 374 and then to 507. Every byte the
      * mount wrote was correct; only the probe's offset was wrong.
      *
-     * The slot is reserved above, before anything is created, and that ordering
-     * is load-bearing (see the comment there) -- so drop the STALE slot rather
-     * than re-reserving, and let the reservation already held in `e` become the
-     * single tracker of this path. find_path() already exists and already
-     * answers exactly this question; nothing was calling it.
+     * THIS MUST COME AFTER join_path(). An earlier version of this fix sat six
+     * lines ABOVE it, where `rel` was still "" -- so find_path searched for the
+     * empty string, matched nothing, and the whole block was dead code. The
+     * 72-iteration run passed anyway, purely because the rename fix shifted the
+     * rnd() stream, which is a worse way to learn a fix does not work than a
+     * test that fails. Only an invariant check after every op showed it: the
+     * duplicate reappeared at iter 76 with `rel` populated and the fix skipped.
      *
-     * alloc_ent leaves in_use == 0, so find_path cannot return `e` itself. */
+     * The slot is reserved at the top of this function, before anything is
+     * created, and that ordering is load-bearing (see the comment there) -- so
+     * drop the STALE slot rather than re-reserving, and let the reservation
+     * already held in `e` become the single tracker of this path. find_path()
+     * already exists and already answers exactly this question; nothing was
+     * calling it. alloc_ent leaves in_use == 0, so find_path cannot return `e`.
+     */
     {
         struct ent *stale = find_path(rel);
         if (stale && stale != e) {
@@ -491,7 +500,6 @@ static void do_create(void) {
             memset(stale, 0, sizeof *stale);
         }
     }
-    if (join_path(rel, sizeof rel, dir, name) != 0) return;
     path_of(full, sizeof full, dir, name);
     buf = malloc(len ? len : 1);
     for (size_t i = 0; i < len; i++) buf[i] = (unsigned char)rnd(256);
@@ -813,6 +821,35 @@ static void do_rmdir(void) {
 
 /* ------------------------------------------------------------------ */
 
+/* The model must hold EXACTLY ONE slot per path. Two slots for one path is not
+ * a cosmetic bookkeeping slip: random_file() picks among slots, so an op can act
+ * on the stale one at a length the mount never had, and the mount is then
+ * reported as corrupting data when it did exactly the right thing. That is what
+ * produced the long-running "write landed wrong bytes" blocker on
+ * mount_write.sh, and it took an invariant check after every op to find -- the
+ * fixes it was looking for appeared to work, because each one shifted the
+ * rnd() stream enough to hide the next.
+ *
+ * Enforced after every op rather than trusted, and it costs only strcmp over the
+ * in-use slots (a handful in practice). Without it this class of probe bug is
+ * invisible: the probe reports a filesystem defect that does not exist, and
+ * sends the investigation into the library. */
+static int model_duplicate_path(char *out, size_t cap) {
+    for (int i = 0; i < MAX_ENT; i++) {
+        if (!g_ent[i].in_use) continue;
+        for (int j = i + 1; j < MAX_ENT; j++) {
+            if (!g_ent[j].in_use) continue;
+            if (strcmp(g_ent[i].path, g_ent[j].path) == 0) {
+                snprintf(out, cap,
+                         "two model slots track %s (len %zu and %zu)",
+                         g_ent[i].path, g_ent[i].len, g_ent[j].len);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: mount_write_probe <mountpoint> <iterations> "
@@ -882,6 +919,13 @@ int main(int argc, char **argv) {
         else if (pick < 92) do_mkdir();
         else                do_rmdir();
         if (failures) break;
+        {
+            char dup[300];
+            if (model_duplicate_path(dup, sizeof dup)) {
+                fail("model invariant violated", dup);
+                break;
+            }
+        }
     }
 
     printf("wprobe: ops=%lu accepted=%lu refused=%lu\n",

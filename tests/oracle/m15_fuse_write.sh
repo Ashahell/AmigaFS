@@ -94,6 +94,9 @@ printf 'hello amiga\n' > "$WORK/small.txt"
 
 # ---- 1. default mount refuses writes, fixture bit-identical ---------------
 cp "$ROOT/tests/fixtures/testffs.adf" "$WORK/ro.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/ro.adf" --yes >/dev/null 2>&1 || true
 sha_before=$(sha256sum < "$WORK/ro.adf" | cut -d' ' -f1)
 if mount_ro "$WORK/ro.adf"; then
     # The errno matters as much as the failure: a write refused because the
@@ -132,6 +135,9 @@ fi
 
 # ---- 2. rw mount: POSIX create/write/append/truncate -----------------------
 cp "$ROOT/tests/fixtures/testffs.adf" "$WORK/rw.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/rw.adf" --yes >/dev/null 2>&1 || true
 if mount_rw "$WORK/rw.adf"; then
     cp "$WORK/big.bin" "$WORK/mnt/big" 2>/dev/null \
         && cp "$WORK/small.txt" "$WORK/mnt/small" 2>/dev/null \
@@ -233,6 +239,9 @@ fi
 
 # ---- 4. rm/mv/rmdir through the mount ---------------------------------------
 cp "$ROOT/tests/fixtures/testffs.adf" "$WORK/m.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/m.adf" --yes >/dev/null 2>&1 || true
 if mount_rw "$WORK/m.adf"; then
     mkdir "$WORK/mnt/D1" && mkdir "$WORK/mnt/D2" && cp "$WORK/small.txt" "$WORK/mnt/D1/a" \
     && mv "$WORK/mnt/D1/a" "$WORK/mnt/D2/b" && rm "$WORK/mnt/D2/b" && rmdir "$WORK/mnt/D1" \
@@ -277,6 +286,15 @@ fi
 
 # ---- 5. RDB: write one partition, EXDEV across, others identical ------------
 cp "$ROOT/tests/fixtures/a590_WD93028XA_6parts.hdd" "$WORK/r.hdd"
+# An RDB image is six PARTITIONS, each with its own bitmap, and a stale one
+# refuses writes -- so every partition is rebuilt, named explicitly. A
+# whole-image rebuild would treat the RDB block itself as volume data.
+for p in OFS "OFS INTL" "OFS DirCache" FFS "FFS INTL" "FFS DirCache"; do
+    "$BIN/afs" bitmap-rebuild "$WORK/r.hdd" "$p" --yes >/dev/null 2>&1 || true
+done
+
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
 before=$(for p in OFS "OFS INTL" "OFS DirCache" FFS "FFS INTL" "FFS DirCache"; do "$BIN/afs" cat "$WORK/r.hdd" "$p/Trashcan.info" 2>/dev/null | sha256sum | cut -d' ' -f1; done)
 if mount_rw "$WORK/r.hdd"; then
     cp "$WORK/small.txt" "$WORK/mnt/FFS/from-mount" 2>/dev/null

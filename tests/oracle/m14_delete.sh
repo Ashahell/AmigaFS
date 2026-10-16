@@ -55,6 +55,9 @@ used_of() { "$BIN/afs" bitmap "$1" ${2:+$2} 2>/dev/null | sed -n 's/^used: *//p'
 # ---- 1. rm file: gone from oracles, bitmap exact ---------------------------
 for img in blank.adf testffs.adf; do
     cp "$ROOT/tests/fixtures/$img" "$WORK/w.adf"
+    # A stale map is what refuses writes, so every case starts from a
+    # fresh one. Same remedy in every writing gate.
+    "$BIN/afs" bitmap-rebuild "$WORK/w.adf" --yes >/dev/null 2>&1 || true
     "$BIN/afs" mkdir "$WORK/w.adf" NDIR >/dev/null 2>&1
     "$BIN/afs" put "$WORK/w.adf" NDIR/big "$WORK/big.bin" >/dev/null 2>&1
     before=$(used_of "$WORK/w.adf")
@@ -94,6 +97,9 @@ done
 
 # ---- 2. rmdir: non-empty refused, empty removed, bitmap exact ---------------
 cp "$ROOT/tests/fixtures/blank.adf" "$WORK/d.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/d.adf" --yes >/dev/null 2>&1 || true
 "$BIN/afs" mkdir "$WORK/d.adf" DD >/dev/null 2>&1
 "$BIN/afs" put "$WORK/d.adf" DD/f "$WORK/small.txt" >/dev/null 2>&1
 out=$("$BIN/afs" rm "$WORK/d.adf" DD 2>&1)
@@ -116,6 +122,9 @@ fi
 # gained exactly one cache block on its first child; removing both files then
 # the dir must return 1 (dir) + 1 (cache) = 2 blocks.
 cp "$ROOT/tests/fixtures/testffs.adf" "$WORK/dc.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/dc.adf" --yes >/dev/null 2>&1 || true
 "$BIN/afs" mkdir "$WORK/dc.adf" ND >/dev/null 2>&1
 "$BIN/afs" put "$WORK/dc.adf" ND/a "$WORK/small.txt" >/dev/null 2>&1
 "$BIN/afs" put "$WORK/dc.adf" ND/b "$WORK/small.txt" >/dev/null 2>&1
@@ -138,6 +147,9 @@ fi
 
 # ---- 3. mv: same-dir rename, cross-dir move, refusals -----------------------
 cp "$ROOT/tests/fixtures/testffs.adf" "$WORK/m.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/m.adf" --yes >/dev/null 2>&1 || true
 "$BIN/afs" mkdir "$WORK/m.adf" D1 >/dev/null 2>&1
 "$BIN/afs" mkdir "$WORK/m.adf" D2 >/dev/null 2>&1
 "$BIN/afs" put "$WORK/m.adf" D1/a "$WORK/small.txt" >/dev/null 2>&1
@@ -191,6 +203,9 @@ fi
 # image cannot even resolve its paths and passes vacuously. Shared state
 # between destructive cases is how a mutant hides -- proven the hard way.
 cp "$ROOT/tests/fixtures/testffs.adf" "$WORK/cyc.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/cyc.adf" --yes >/dev/null 2>&1 || true
 "$BIN/afs" mkdir "$WORK/cyc.adf" D1 >/dev/null 2>&1
 out=$("$BIN/afs" mv "$WORK/cyc.adf" D1 D1/D1 2>&1)
 if [ $? -ne 0 ]; then
@@ -199,6 +214,9 @@ else
     bad "mv dir into itself" "succeeded"
 fi
 cp "$ROOT/tests/fixtures/testffs.adf" "$WORK/cyc2.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/cyc2.adf" --yes >/dev/null 2>&1 || true
 "$BIN/afs" mkdir "$WORK/cyc2.adf" D1 >/dev/null 2>&1
 "$BIN/afs" mkdir "$WORK/cyc2.adf" D1/sub >/dev/null 2>&1
 out=$("$BIN/afs" mv "$WORK/cyc2.adf" D1 D1/sub/moved 2>&1)
@@ -222,6 +240,9 @@ fi
 
 # ---- 4. reverse: xdftool deletes, we agree ----------------------------------
 cp "$ROOT/tests/fixtures/blank.adf" "$WORK/x.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/x.adf" --yes >/dev/null 2>&1 || true
 xdftool "$WORK/x.adf" makedir XD >/dev/null 2>&1
 xdftool "$WORK/x.adf" write "$WORK/small.txt" XD/old >/dev/null 2>&1
 if xdftool "$WORK/x.adf" delete XD/old >/dev/null 2>&1; then
@@ -241,6 +262,15 @@ fi
 
 # ---- 5. RDB: rm/mv inside one partition, others identical ------------------
 cp "$ROOT/tests/fixtures/a590_WD93028XA_6parts.hdd" "$WORK/r.hdd"
+# An RDB image is six PARTITIONS, each with its own bitmap, and a stale one
+# refuses writes -- so every partition is rebuilt, named explicitly. A
+# whole-image rebuild would treat the RDB block itself as volume data.
+for p in OFS "OFS INTL" "OFS DirCache" FFS "FFS INTL" "FFS DirCache"; do
+    "$BIN/afs" bitmap-rebuild "$WORK/r.hdd" "$p" --yes >/dev/null 2>&1 || true
+done
+
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
 before=$(for p in OFS "OFS INTL" "OFS DirCache" FFS "FFS INTL" "FFS DirCache"; do "$BIN/afs" cat "$WORK/r.hdd" "$p/Trashcan.info" 2>/dev/null | sha256sum | cut -d' ' -f1; done)
 "$BIN/afs" mkdir "$WORK/r.hdd" "FFS/TD" >/dev/null 2>&1
 "$BIN/afs" put "$WORK/r.hdd" "FFS/TD/t" "$WORK/small.txt" >/dev/null 2>&1
@@ -262,6 +292,9 @@ fi
 # Self-contained (own copy, own writes, own delete): section 1's w.adf still
 # holds its files, so it cannot serve here.
 cp "$ROOT/tests/fixtures/testffs.adf" "$WORK/w.adf"
+# A stale map is what refuses writes, so every case starts from a
+# fresh one. Same remedy in every writing gate.
+"$BIN/afs" bitmap-rebuild "$WORK/w.adf" --yes >/dev/null 2>&1 || true
 "$BIN/afs" mkdir "$WORK/w.adf" NDIR >/dev/null 2>&1
 "$BIN/afs" put "$WORK/w.adf" NDIR/big "$WORK/big.bin" >/dev/null 2>&1
 "$BIN/afs" put "$WORK/w.adf" NDIR/small "$WORK/small.txt" >/dev/null 2>&1

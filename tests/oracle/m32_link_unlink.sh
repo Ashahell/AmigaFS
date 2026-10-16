@@ -49,6 +49,8 @@ echo "M32 removing a link returns its block"
 FIX_BEFORE=$(sha256sum < "$FIXTURE" | cut -d' ' -f1)
 IMG="$WORK/t.adf"
 cp "$FIXTURE" "$IMG"
+# A stale map is what refuses writes; a fresh one is the starting point.
+"$AFS" bitmap-rebuild "$IMG" --yes >/dev/null 2>&1 || true
 
 # `afs bitmap`'s own free count -- the measurement that found the defect.
 freecount() { "$AFS" bitmap "$IMG" | awk '/^free:/{print $2}'; }
@@ -152,6 +154,8 @@ MNT="$WORK/mnt"
 mkdir -p "$MNT"
 MIMG="$WORK/fuse.adf"
 cp "$FIXTURE" "$MIMG"
+# A stale map is what refuses writes; a fresh one is the starting point.
+"$AFS" bitmap-rebuild "$MIMG" --yes >/dev/null 2>&1 || true
 mf() { "$AFS" bitmap "$MIMG" | awk '/^free:/{print $2}'; }
 
 if "$FUSE" -f "$MIMG" "$MNT" -o rw >"$WORK/fuse.log" 2>&1 & then

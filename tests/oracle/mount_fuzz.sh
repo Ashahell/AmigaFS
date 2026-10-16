@@ -325,6 +325,10 @@ for lane in strict lenient; do
         RANDOM=$(( (SEED_BASE + i * 31 + lane_no) % 32768 ))
         src="${SOURCES[$(( (i + 7) % ${#SOURCES[@]} ))]}"
         cp "$src" "$IMG" 2>/dev/null || continue
+        # Every fixture's map is stale, and a stale map is what refuses writes:
+        # without this the probe gets EIO on create and never exercises anything.
+        # Same single line as m13_write.sh and friends -- one remedy, not two.
+        "$ROOT/build/afs" bitmap-rebuild "$IMG" --yes >/dev/null 2>&1 || true
         size=$(stat -c%s "$IMG" 2>/dev/null || echo 0)
         [ "$size" -gt 1024 ] || continue
         # the lenient lane mutates; the strict lane must stay a healthy volume

@@ -50,6 +50,8 @@ FIX_BEFORE=$(sha256sum < "$FIXTURE" | cut -d' ' -f1)
 # ---------------------------------------------------------------- via the CLI
 IMG="$WORK/cli.adf"
 cp "$FIXTURE" "$IMG"
+# A stale map is what refuses writes; a fresh one is the starting point.
+"$AFS" bitmap-rebuild "$IMG" --yes >/dev/null 2>&1 || true
 
 echo "payload" > "$WORK/realfile.txt"
 "$AFS" put "$IMG" /realfile.txt "$WORK/realfile.txt" >/dev/null
@@ -132,6 +134,8 @@ MNT="$WORK/mnt"
 mkdir -p "$MNT"
 MIMG="$WORK/fuse.adf"
 cp "$FIXTURE" "$MIMG"
+# A stale map is what refuses writes; a fresh one is the starting point.
+"$AFS" bitmap-rebuild "$MIMG" --yes >/dev/null 2>&1 || true
 if "$FUSE" -f "$MIMG" "$MNT" -o rw >"$WORK/fuse.log" 2>&1 &
 then
     sleep 3

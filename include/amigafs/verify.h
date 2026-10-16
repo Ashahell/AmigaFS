@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "amigafs/volume.h"
+
 /* The structure verifier behind `afs verify`.
  *
  * Checksums settle to ONE rule valid for every block type: the stored checksum
@@ -101,6 +103,13 @@ typedef struct {
 
 int afs_verify_memory_ex(const uint8_t *img, size_t size, size_t bsize,
                          afs_verify_report_t *out, int max, unsigned flags);
+
+/* True when the volume's allocation map marks FREE a block its directory tree
+ * references -- the state in which the allocator hands out a block already in
+ * use, which is silent data loss. `*block_out` receives the first such block. A
+ * volume that cannot be checked counts as disagreeing: "we could not check"
+ * must not read as "we checked and it is fine". */
+int afs_verify_map_disagrees(afs_volume_t *v, uint32_t *block_out);
 
 /* The everyday check: structural damage, with strict mode OFF. Kept as its own
  * entry point (rather than as flags == 0 at every call site) so that the many

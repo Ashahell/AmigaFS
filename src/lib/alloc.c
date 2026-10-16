@@ -1,5 +1,6 @@
 /* Block allocation (D3 write phase). See alloc.h for the contract. */
 #include "amigafs/alloc.h"
+#include "amigafs/verify.h"
 #include "amigafs/be.h"
 #include "amigafs/bitmap.h"
 #include "amigafs/blocktypes.h"
@@ -86,6 +87,23 @@ static int read_bitmap_root(afs_volume_t *v, uint8_t *rblk, size_t bs,
                     "bitmap block count %d, but a %u-block volume needs %zu; "
                     "the allocation map cannot be trusted",
                     pages, nblocks, want);
+            return -1;
+        }
+    }
+    /* The map must also agree with the TREE (M34). The checks above are about
+     * the map's SELF-consistency and never ask whether it matches the DATA;
+     * bm_flag == -1 is AmigaDOS's claim and is not evidence that it does. Same
+     * discipline as the refusals above: refuse with a NAME and the remedy,
+     * rather than corrupt. And the remedy exists -- afs bitmap-rebuild. */
+    {
+        uint32_t bad = 0;
+        if (afs_verify_map_disagrees(v, &bad)) {
+            set_err(errbuf, errlen,
+                    "the allocation map disagrees with the directory tree: "
+                    "block %u is referenced but marked free, so allocating "
+                    "from it would hand out a block that is in use. Rebuild "
+                    "the map first: afs bitmap-rebuild <image> --yes",
+                    bad);
             return -1;
         }
     }
