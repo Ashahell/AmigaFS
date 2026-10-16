@@ -1756,6 +1756,35 @@ itself about and no oracle can check.
 
 **And the plan's instruction is corrected in place**, because leaving a
 prescribed method that cannot work is how the next session spends a day on it.
+### M41 — the last open cell: OFS+INTL, and refusing to create is not refusing to read (2026-10-16)
+
+M38's record of the INTL/DIRC risk said the OFS+INTL cell *"cannot be closed with
+the pinned oracles"*, on the evidence that `adfformat` rejects `-t 2/4/6`. That
+was true of `adfformat` and **false of the oracles.**
+
+- `adfformat` refuses them at `examples/adfformat.c:261`
+  (`fsType > 0 && fsType % 2 == 0`) because it cannot *create* them.
+- `adfinfo` and `unadf` read a `DOS\2` image perfectly well — the cell was never
+  unobservable, only un*formattable*.
+
+The construction is one byte: the DOS subtype is byte 3 of the bootblock's first
+long, so `adfformat -t 0` plus a byte at offset 3 **is** an OFS+INTL volume.
+That is a legitimate construction rather than a fake — the subtype byte is the
+only difference between these variants, and the oracle reads the result and
+extracts from it, which is the check that matters.
+
+    DOS\2  OFS/INTL        ours: "DOS\2 OFS/INTL"        oracle extraction BYTE-IDENTICAL
+    DOS\4  OFS/DIRC&INTL   ours: "DOS\4 OFS/DIRC&INTL"   oracle extraction BYTE-IDENTICAL
+    DOS\6  refused by us, and the oracle extracts nothing either -- agreement
+
+So **all six DOS types now round-trip byte-identically**, and the last known gap
+in the plan's risk list is closed. The lesson is the shape of the error rather
+than the byte offset: **a tool's inability to create a thing is not evidence
+about anyone's ability to read it**, and I had recorded the former as the latter
+and written off a cell as unreachable. It is the same move as the "ADFlib RDB
+support is experimental" claim retired in M40 — testing an inherited limitation
+instead of inheriting it.
+
 ### M40 — the "ADFlib RDB support is experimental" claim is wrong for this purpose (2026-10-16)
 
 The last open risk. The M7 gate used **amitools `rdbtool` alone**, because
@@ -2188,11 +2217,16 @@ Owner decisions, recorded. These are settled, not open.
 
 ## 7. Open risks
 
-- **INTL/DIRC exactness — CLOSED for everything the pinned oracles can
-  produce (M37).** `-t 0/1/3/5` round-trip byte-identically against `unadf`.
-  **STILL OPEN: OFS+INTL (`-t 2/4/6`)**, because `adfformat` refuses to create
-  them (`examples/adfformat.c:261`) — a limit of the oracle's tool, not of the
-  format. Needs another generator or a hand-built image.
+- **INTL/DIRC exactness — CLOSED (M41).** All six DOS types round-trip
+  byte-identically against `unadf`: `-t 0/1/3/5` formatted by `adfformat`, and
+  **DOS\\2 (OFS/INTL) and DOS\\4 (OFS/DIRC&INTL) constructed by patching byte 3 of
+  the bootblock's first long** in a `adfformat -t 0` image. The earlier record
+  here said the OFS+INTL cell "cannot be closed with these oracles", which was
+  true of `adfformat` and **false of the oracles**: refusing to CREATE a volume
+  is not refusing to READ one. `adfinfo` and `unadf` read the constructed image
+  and extract from it without complaint. DOS\\6 and DOS\\7 are refused by us
+  (AmigaOS 3.2 long-filename types) and extract nothing from the oracle either --
+  agreement, not a gap.
 - **ADFlib RDB support is experimental:** see the M7 gate.
 - **Hostile images** (`ffdisk0049.adf`, fuzzed blocks): every pointer is bounds-checked, every chain is cycle-guarded, and nothing in the core aborts. Add a libFuzzer target over `blockio` with a memory backend after M4.
 - **Directory-block GID width — SETTLED AS UNSETTLEABLE HERE (M38).** The
