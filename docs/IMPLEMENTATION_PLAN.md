@@ -1369,6 +1369,75 @@ then re-run with the unlink and rename operations suppressed, and see whether
 iter 71 still fails. If suppressing them clears it, the defect is in reuse
 after removal; if it still fails, the prior state is only a directory layout
 and the fault is in how a header block is resolved.
+### Down to the bytes: the file's recorded geometry does not match the write
+
+Instrumenting a **copy** of the probe (throwaway, outside the repo -- the
+committed gate is untouched) and dumping both sides of the first divergence:
+
+```
+DIVERGE len=133 at +0 (file offset 228)
+  want[0..48): 3e7237b89c57ce4d820a1d388eeb98bc453f05d89bcfea434240b728b331b4a
+  got [0..48): 479b6bd94a187ac60fb60f6a7f68ff1cb5aefadc01b374c6b8275754c2da6a
+```
+
+The divergence is at **+0** -- the very first byte, not a shifted tail and not an
+off-by-one. So this is not "the append landed a few bytes late".
+
+**What is actually on disk afterwards**, resolved through the file's own chain
+(`entries = 512/4 - 56 = 72`, so table entry k is at `hdr + 24 + 4*(71-k)`):
+
+```
+.wprobe/lrfcbw
+  header block 1132, recorded size 507 bytes  (needs TWO blocks)
+  table entry 0 -> 1133, entry 1 -> 1125
+  data0 block 1133: type=00000008 seq=1 data_size=488 next=1125   bitmap: used
+  data1 block 1125: type=00000008 seq=2 data_size=19  next=0      bitmap: used
+  data1 payload: fd 88 41 9c b1 cc 5d 16 4a 11 55 87 c2 ... then zeros
+```
+
+**The recorded geometry and the operation that produced it do not match:**
+
+| | probe says | image says |
+|---|---|---|
+| size before the append | 228 | |
+| bytes appended | 133 | |
+| size after | **361 (one block)** | **507 (two blocks)** |
+| second data block | not needed | 1125, `data_size` 19 |
+
+228 + 133 = 361, which fits in one 488-byte payload. The image has two data
+blocks and a size of 507 -- **146 bytes more than the write contained**. And
+`data1` holds 19 bytes of stale content followed by zeros, which is the shape
+of a block that was freed and reissued, not of a block this write filled.
+
+Reading block 1133's payload at offset 228 gives the probe's `got` bytes
+exactly -- so **the read path is self-consistent, and the appended bytes are
+simply not there.** The file claims to be longer than the data it contains.
+
+**And the probe's model already disagreed with the mount before the append.**
+`do_append` prints `model len 228`, but the header says 507. `do_create` calls
+`reload(e)` and adopts the mount's reported length, so the model was 228 as of
+iter 67's create. Between iter 67 and iter 71 the probe does exactly three
+things -- `mkdir`, `rename`, `unlink` -- and none of them touches this file. So
+either
+
+- the model went stale and the append used the wrong offset, or
+- **one of those three directory mutations wrote 279 bytes into this file.**
+
+Those have very different fixes, and I cannot yet tell them apart. What is not
+in doubt is the invariant that is broken: **a file's recorded size, its block
+table and its data must agree**, and here all three disagree with each other.
+That is the thing to pin, and it is checkable directly on the image without
+running the probe at all: for every file, `header.size` must equal
+`sum(data_size)` over its chain, and `data0.data_size + data1.data_size` must
+equal the header's size. On this file they do not.
+
+The next step follows from that: make a checker that walks every file on the
+image and asserts `header.size == sum(data_size in chain)`, then run it over
+the post-failure image and over each fixture after a rebuild. If it fires on the
+post-failure image only, the write path corrupts a file's geometry and the
+library test that passes in isolation is missing the precondition -- the
+directory churn. If it fires on a fixture too, there is a standing geometry bug
+that no gate looks for.
 ### Rules M34
 
 - **M34.1 — A self-consistent map is not an accurate map.** The two guards
