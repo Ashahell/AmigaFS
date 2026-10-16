@@ -30,6 +30,37 @@ only the main repository — the worktree had been properly de-registered, not m
 The differing signatures matter: the first left `build/` behind, the later ones removed
 the directory entirely. That is not one mechanism observed three times.
 
+### WHEN, exactly, in the third occurrence — and a claim I had to retract
+
+Three `ctest` logs survived the third deletion inside `build/Testing/Temporary/`. Their
+**mtimes are the evidence**, and they corrected an inference I published before checking
+them:
+
+```
+LastTestsFailed.log   20:09:42   names gates 28, 53, 54   <- the last three of 54
+LastTest.log          20:09:49   123 bytes, Start/End only
+```
+
+I had written that ctest "died on its **first** test, before recording a result." **That
+was wrong.** The failure list is timestamped 20:09:42 and names the *final* three gates,
+so ctest ran **all 54 tests to completion** and recorded three failures. The deletion hit
+seven seconds later, at 20:09:49, **while ctest was writing its final log** — which is
+why `LastTest.log` survived as a Start/End pair with no per-test entries. The directory
+was removed during the run's last write, not at its start.
+
+Two things about how that mistake happened are worth more than the mistake:
+
+- **A control would have caught it.** A healthy run's `LastTest.log` is 3389 lines with
+  per-test `N/54 Testing:` entries; the incident copy is 4. But I read only the incident
+  copy and inferred from its shape. The control is one command, and it is the whole
+  difference between "died at the start" and "died at the end".
+- **`LastTestsFailed.log` is stale-prone and I nearly leaned on it.** In a surviving
+  clone, a run at 100% passed, 54/54, on a clean tree, and the file still listed four
+  failures with an mtime from an **earlier** run — ctest does not rewrite it on success.
+  So "this file lists failures" does not mean "this file describes this run". The mtime
+  is what makes it current here. **A log file is evidence of the run that wrote it, and
+  you have to check which run that was.**
+
 ## Recovery (nothing committed was ever lost, three times)
 
 - Worktrees share the object store, so a commit whose `.git` is gone still exists as an
