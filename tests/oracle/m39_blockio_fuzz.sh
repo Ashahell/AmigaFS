@@ -64,6 +64,7 @@ echo "M39: running $RUNS inputs"
 # first mutant run of this gate left a 400-byte crash-* file in the repo root,
 # which `git add amigafs/` then committed. A gate that finds something must leave
 # its evidence somewhere deliberate, not in the tree.
+before_artifacts=$(ls crash-* timeout-* oom-* leak-* 2>/dev/null | sort)
 timeout 900 "$BIN" "$CORP" -runs="$RUNS" -max_len=65536 \
     -timeout=10 -rss_limit_mb=2048 -print_final_stats=1 \
     -artifact_prefix="$W/" >"$W/out.log" 2>&1
@@ -85,7 +86,15 @@ rc=$?
 #
 # So it is asserted here instead: the flag must be present on the invocation, and
 # after the run the repository root must be free of libFuzzer's artifact names.
-debris=$(ls crash-* timeout-* oom-* leak-* 2>/dev/null | head -5)
+# Snapshot BEFORE the run (above) and only blame what THIS run added. An earlier
+# version globbed the artifact names after the fact, which fired on a crash file
+# left by a PREVIOUS run -- so the gate failed for a leftover rather than for its
+# own debris, and the failure named a cause that was not it. It also broke
+# `ctest`, which runs the suite in the same tree and had no way to explain that.
+after_artifacts=$(ls crash-* timeout-* oom-* leak-* 2>/dev/null | sort)
+new_artifacts=$(comm -13 <(printf '%s\n' "$before_artifacts") \
+                           <(printf '%s\n' "$after_artifacts") | head -5)
+debris=$new_artifacts
 if [ ! -f "$W/.prefix-ok" ]; then
     if grep -q -- '-artifact_prefix=' "$0" && grep -q -- '-artifact_prefix=' \
         <(sed -n '/timeout .*"\$BIN"/,/2>&1/p' "$0"); then
