@@ -2286,6 +2286,20 @@ Owner decisions, recorded. These are settled, not open.
 
 ## 7. Open risks
 
+**STATUS: none of the five risks below is open.** Two are closed and were marked in
+place (M41, M50), one is refuted outright (M40), one is closed and had been sitting
+here unmarked since M39, and one is settled as unsettleable *here* (M38, which needs
+the MultiUser filesystem handler itself, not a better test).
+
+**This section was itself stale until M50.** Three of these five bullets still said
+something false or finished — the RDB bullet asserted a claim M40 had already
+refuted, the hostile-images bullet prescribed an action M39 had already taken, and
+the `ffstd64` bullet described work that existed but was untested. A risk list that
+understates reality is **worse than no risk list**, because it is where you look when
+deciding what is left; if it always shows five open items, it stops being read. The
+lesson is the wiki lint's, applied to the plan: an outdated claim in a *live* page
+needs a marker, while a dated milestone record keeps its original text.
+
 - **INTL/DIRC exactness — CLOSED (M41).** All six DOS types round-trip
   byte-identically against `unadf`: `-t 0/1/3/5` formatted by `adfformat`, and
   **DOS\\2 (OFS/INTL) and DOS\\4 (OFS/DIRC&INTL) constructed by patching byte 3 of
@@ -2296,8 +2310,27 @@ Owner decisions, recorded. These are settled, not open.
   and extract from it without complaint. DOS\\6 and DOS\\7 are refused by us
   (AmigaOS 3.2 long-filename types) and extract nothing from the oracle either --
   agreement, not a gap.
-- **ADFlib RDB support is experimental:** see the M7 gate.
-- **Hostile images** (`ffdisk0049.adf`, fuzzed blocks): every pointer is bounds-checked, every chain is cycle-guarded, and nothing in the core aborts. Add a libFuzzer target over `blockio` with a memory backend after M4.
+- **ADFlib RDB support is experimental — REFUTED, NOT A RISK (M40).** The
+  claim was tested rather than inherited and does not hold for this use:
+  **`adfinfo` prints a full partition table** (idx, first bl., last bl.,
+  filesystem, name) that agrees with `rdbtool` on every field of every partition
+  of the A590 image. So M7's "gate met against `rdbtool` alone" became a
+  **two-oracle** cross-check, proven by doctoring the second and watching it fail.
+  The bullet stayed here unmarked for several milestones after M40 closed it,
+  which is the same stale-live-page shape as the wiki lint: a risk list that
+  understates reality is worse than no risk list, because it is where you look
+  when deciding what is left. See the M40 record.
+- **Hostile images — CLOSED (M39).** `ffdisk0049.adf` and fuzzed blocks: every
+  pointer bounds-checked, every chain cycle-guarded, nothing in the core aborts.
+  The prescribed action — *add a libFuzzer target over `blockio` with a memory
+  backend* — **is done**: `tests/fuzz/fuzz_blockio.c` drives
+  `blockdev_open_memory`, and `m39_blockio_fuzz.sh` runs it under
+  ASan+UBSan for 20 000 inputs. What made the gate worth having is that its first
+  coverage floor was on `number_of_executed_units`, which counts *runs* and so
+  **cannot fail**; M39 moved it to `new_units_added`, which is the measure that
+  proves the fuzzer actually EXPLORED. The mutant that broke the old floor also
+  exposed undocumented defence in depth inside `blockdev_read`, which is now
+  documented rather than removed.
 - **Directory-block GID width — SETTLED AS UNSETTLEABLE HERE (M38).** The
   prescribed method was impossible: **ADFlib's `AdfDirBlock` has no `uid` or
   `gid` field at all** (`src/adf_blk.h:266`), **amitools' `UserDirBlock` does
@@ -2313,4 +2346,27 @@ Owner decisions, recorded. These are settled, not open.
   MultiUser filesystem handler itself, or a genuine MultiUser-formatted
   image. Do not re-attempt the cross-check: it is empty by construction.
 
-- **Large volumes:** a 32-bit block count with `BSIZE` up to 32 KiB stays in range. Refuse `ffstd64` explicitly.
+- **Large volumes — CLOSED (M50).** A 32-bit block count with `BSIZE` up to
+  32 KiB stays in range, and `ffstd64` is refused — but the refusal was **already
+  implemented and entirely untested**, which is why this bullet sat here for so
+  long. `read_dos_id` requires the descriptor's first three bytes to be exactly
+  `"DOS"`, and `ffstd64` carries `FS64`/`DF64`. Two things were wrong with how I
+  had recorded it, and both are corrections rather than completions:
+  - I had claimed the refusal was *"an accident of the encoding"*. It is a
+    deliberate **name** check, with a comment in the code saying so. The claim
+    looked plausible only because `dostype = flags & 0x07` does mask the fourth
+    byte, and six real filesystem tags (`SFS1` `PFS1` `IFFS` `FS64` `DF64` `LNX1`)
+    mask into DOS\\0-DOS\\5.
+  - **The mask would have been a genuine hole without the name check** — remove it
+    and the reader accepts `SFS1`/`PFS1`/`LNX1` as AmigaDOS volumes and lists their
+    contents. Demonstrated by mutation, not argued.
+  `m50_nondos_refusal.sh` now pins both halves plus the naming: a user with an SFS
+  volume used to be told *"no DOS filesystem id on block 0 or block 1"* — true, and
+  useless, since the disk has one and it is simply not an AmigaDOS. It is now
+  `filesystem id 'SFS1' is not an AmigaDOS filesystem`, which is M44's rule applied
+  to images: **name the cause, do not blame the input.**
+
+  One format fact is asserted first in that gate, because getting it wrong twice
+  made it pass while testing an id that does not exist: the AmigaDOS id is `D` `O`
+  `S` plus **one binary byte**, not the ASCII string `"DOS3"` (`testffs` is
+  `44 4f 53 05`, `testofs` `44 4f 53 02`, `links` `44 4f 53 01`).

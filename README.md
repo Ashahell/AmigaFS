@@ -160,6 +160,26 @@ example, and the two traps worth knowing about.
 
 ## Known limits
 
+- **No external oracle can verify a link — this one is worth reading.** Both
+  pinned oracles fail on hard and soft links, differently. ADFlib's `unadf`
+  **skips them silently** (it extracts each real file once per link group), and
+  amitools' `xdftool` **refuses the whole volume** (`Unsupported Dir Block`,
+  `Sub_Type fffffffc` = `-4`, `ADF_ST_LFILE`). That is per-volume, not per-entry:
+  one hard link makes amitools blind to *every* entry on the disk, not just to
+  the links. So on a link-bearing volume ADFlib is the only oracle that reaches
+  it at all, and ADFlib does not expose links.
+
+  What is checked instead, and it is checked structurally rather than through the
+  mount: `m48_link_structure.sh` and `m49_softlink_structure.sh` read **raw
+  blocks** and assert the on-disk invariants — a linked name is a *link block*
+  (`secType -4`/`4`/`3`) whose `realEntry` points at the real file header, blocks
+  chained by `nextLink`, every block carrying a self-pointer `headerKey`. The
+  soft-link gate goes further and compares our block against **the volume's own
+  `slink_dir1`**, field for field — a block written by a real AmigaDOS — requiring
+  all 13 comparable fields to match. There is no hardlink-*count* field on an FFS
+  file header; the name count is the length of the chain. `m47` pins the gap so it
+  cannot be quietly forgotten, and will report it if an oracle ever gains support.
+
 - **Hard links and soft links are both written.** `afs link` and the mount's
   `link()` (`ln`) create a hard link, and `unlink` removes one: it frees only
   that name's header block, leaves the target and its data untouched, and
@@ -191,7 +211,14 @@ example, and the two traps worth knowing about.
   `forbidden-files`), not behind the POSIX VFS and not behind a flag.
 - **The directory cache is parsed and verified but not used for listing.** The
   hash table is the authority, so a stale cache cannot hide a file.
-- **64-bit (`ffstd64`) volumes** are refused rather than misread.
+- **64-bit (`ffstd64`) volumes** are refused rather than misread, and the refusal
+  **names what it found**: `filesystem id 'FS64' is not an AmigaDOS filesystem
+  (only DOS\0-DOS\5)`. Any non-AmigaDOS tag is refused the same way — `SFS1`,
+  `PFS1`, `IFFS`, `LNX1` — because a descriptor's first three bytes must be
+  exactly `DOS`. This matters more than it looks: `DOS\6` and `DOS\7` are *real*
+  AmigaDOS types (AmigaOS 3.2 long filenames) that we do not support, and they
+  get their own message saying so, rather than being lumped in with "wrong
+  filesystem". `m50_nondos_refusal.sh` pins all of it.
 - **Writes are refused on a volume whose bitmap cannot be trusted** — `bm_flag`
   not `-1` (AmigaDOS saying the map is suspect), or a bitmap page count the
   volume does not need. Allocating from such a map hands out a block that is
