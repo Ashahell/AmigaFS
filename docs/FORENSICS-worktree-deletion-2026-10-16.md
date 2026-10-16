@@ -1,7 +1,8 @@
-# The 2026-10-16 worktree deletion: what was excluded, and what was not
+# The worktree deletions of 2026-10-16: what was excluded, and what was not
 
-A bounded forensic record. The purpose is to save the next session from repeating
-this search, and to be honest that it did not reach a cause.
+A bounded forensic record. The purpose is to save the next session from repeating the
+search, to be honest that it never reached a cause, and — after the second occurrence —
+to record that the first version's conclusion ("does not reproduce") was wrong.
 
 ## What happened
 
@@ -13,23 +14,54 @@ fatal: Unable to read current working directory: No such file or directory
 ```
 
 The working directory was `/home/miller/Work/projects/Vulkan4Aros/.worktrees/amigafs/amigafs`.
-Every tracked source file and the worktree's `.git` were gone. `build/` survived, and
-`git worktree list` showed only the main repository — i.e. the worktree had been
-properly de-registered, not merely `rm -rf`'d.
+Every tracked source file and the worktree's `.git` were gone. `git worktree list` showed
+only the main repository — the worktree had been properly de-registered, not merely
+`rm -rf`'d.
 
-## Recovery (nothing was lost)
+## It happened three times
 
-- Worktrees share the object store, so the last commit (`e5c60667`, M49) survived as
-  an object even with its `.git` gone. It was pushed straight back to `origin/amigafs`.
-- The worktree was re-created with `git worktree add`, and the fixtures re-fetched
-  (they are fetched, not committed — that is exactly the distinction that decided how
-  much work was lost: **the work lost was the work not yet committed**).
+| | 1st ~17:06 | 2nd ~20:02 | 3rd ~20:09 |
+|---|---|---|---|
+| What survived | `build/` only | **nothing** | nothing |
+| Registry entry | gone | gone | never created; dir exists with no `.git` |
+| Co-occurring signal | `src/abi/v1/AROS/.git/worktrees/**wt_PRE**/` | `src/abi/v1/AROS/.git/worktrees/**wt_PRE3**/` | as 2nd |
+| Uncommitted work lost | none | none | **`CMakeLists.txt` + this file** |
 
-## Window, from filesystem timestamps
+The differing signatures matter: the first left `build/` behind, the later ones removed
+the directory entirely. That is not one mechanism observed three times.
 
-Deletion at **~17:06–17:07 local** (CEST, UTC+2). `build/Testing/Temporary/LastTest.log`
-was written at 17:06, so **ctest was running and writing into `build/` at the moment the
-source disappeared.** The deletion happened *during* the test run, not before it.
+## Recovery (nothing committed was ever lost, three times)
+
+- Worktrees share the object store, so a commit whose `.git` is gone still exists as an
+  object and can be pushed back: `git push origin <sha>:refs/heads/amigafs`.
+- **Worktrees share the object store** is the load-bearing fact, and it held every time.
+- The fixtures are fetched rather than committed, so they were re-fetched. **The work
+  lost, all three times, was exactly the work not yet committed.**
+
+## THE DECISIVE EXPERIMENT, and what it exonerated
+
+The suspicion fell on this project's own gates first, because both deletions happened
+while gates were running. Settled by running the suite **outside the main repository**:
+
+```
+for i in 1 2 3; do ctest --test-dir build; done
+```
+
+in a plain clone at `/tmp`. Three consecutive full `ctest` runs — 54 tests each,
+including `m42_no_repo_writes` which itself runs 24 gates from the repository root —
+left the tree intact every time. **This project's gates do not delete it.**
+
+That matters, because it moves the hypothesis from "something external" to something
+specific and checkable: the worktree lives **inside the main repository's gitignored
+`.worktrees/`**, and an AROS-lane worktree operation (`wt_PRE*`) was in progress in the
+same window both times it was checked. A tool in that lane that enumerates and removes
+worktrees would not have created `.worktrees/amigafs`, and `.worktrees/` being
+**gitignored** means it is invisible to `git status` — and therefore invisible to any
+tool that reasons from `git status`.
+
+**This remains unproven.** Settling it needs to know what else was running, which this
+repository cannot see. But it is now a named suspect with a 3/3 correlation, not a
+vague worry.
 
 ## What was excluded, and how the exclusion was validated
 
@@ -39,38 +71,52 @@ occurrences across the gates, so it can match. It found no *destructive target*.
 
 | Suspect | Finding |
 |---|---|
-| All 38 oracle gates | No destructive `git` (`stash`/`checkout`/`clean`/`reset`/`worktree`) anywhere; only a comment in `m42` documenting a past incident. All 40 `rm -rf` targets are `mktemp -d` paths. |
-| `fuzz_gate` / `mount_fuzz` | `set -uo pipefail`; `WORK` from `mktemp -d`; `OUT` from `${TMPDIR:-/tmp}`. `fuzz_test.c` opens fixtures `"rb"` only — no `remove`, `unlink`, `rename`, `system`, or write-mode `fopen`. |
+| All 38 oracle gates | No destructive `git` anywhere; only a comment in `m42` documenting a past incident. All 40 `rm -rf` targets are `mktemp -d` paths. |
+| `fuzz_gate` / `mount_fuzz` | `set -uo pipefail`; `WORK` from `mktemp -d`; `OUT` from `${TMPDIR:-/tmp}`. `fuzz_test.c` opens fixtures `"rb"` only. |
 | 14 unit tests | `test_blockio.c` calls `remove(path)` on a file it created. No other destructive calls. |
 | `run_all_gates.sh`, `CMakeLists.txt` | No destructive git or `rm` outside the per-gate scratch dirs. |
-| `scripts/aros_audit.sh` (other lane, ran 17:08:37 local, rc=0, 80 s) | All 11 `rm -rf` targets are `mktemp -d` / `mktemp`. |
-| `scripts/aros_pin.py` (other lane, removes worktrees) | Operates on the **AROS** repository at `src/abi/v1/AROS`, a different repository from this one. |
-| `git clean -fd` / `git stash -u` from the main checkout | `.worktrees/` **is** gitignored (`.gitignore:221`), so neither reaches it without `-x`. |
-| Disk exhaustion | 1.7 TB free on `/home`, 10 % used. `/tmp` is tmpfs at 23 %. |
+| `scripts/aros_audit.sh` (other lane) | All 11 `rm -rf` targets are `mktemp -d` / `mktemp`. |
+| `scripts/aros_pin.py` (other lane, removes worktrees) | Operates on the **AROS** repository at `src/abi/v1/AROS` — a different repository. **Not the cause, but see the hypothesis above**: the sweep may be wider than its own repository. |
+| `git clean -fd` / `git stash -u` | `.worktrees/` **is** gitignored, so neither reaches it without `-x`. |
+| Disk exhaustion | 1.7 TB free; `/tmp` tmpfs at 23 %. |
+| **This project's own gates** | **Exonerated by experiment** — 3 × full `ctest` in an isolated clone, tree intact. |
 
-## Not excluded
+## A negative result that was wrong, and what it cost
 
-- **Concurrent activity in the main checkout by another lane.** Confirmed in the same
-  window: `src/abi/v1/AROS/.git/worktrees/wt_PRE/*`, `tests/drm_host/test_stdio_contract.{c,py}`
-  and `src/abi-patches/v1/aros/0075-*.diff` were all being written between 17:00 and 17:10.
-  This is the leading remaining hypothesis and it **cannot be tested from inside this
-  worktree** — it requires knowing what else was running.
-- Anything outside the repository and the gates.
+The first version of this record said **"Does it reproduce? No."** That was an honest
+reading of the evidence available at the time: the harness had run twice, `ctest` had
+run, and every gate had run, all clean.
 
-## Does it reproduce?
+But **a clean run of the thing that was broken is not evidence that the thing is not
+broken** — only that *running it* does not trigger it. Both early occurrences happened
+while gates were running, and both were discovered when the *next* command failed,
+never by anything watching.
 
-**No.** Two full `run_all_gates.sh` runs, a full `ctest` run, and every gate individually
-have run since, with the tree intact and `git status` clean.
+The harness fingerprint added after the first incident **did not fire on the second or
+third**, because it only observes during its own run — the limitation rule 292 records,
+now confirmed three times rather than argued.
+
+## Working practice adopted
+
+- **Do the work in a clone outside the main repository's tree.** Proven stable over
+  three full `ctest` runs; the worktree lane was destroyed three times in one evening.
+- **Commit and push promptly.** Every commit survived; every uncommitted change did not.
+- **When a clone is created with `--depth 1` and then `git checkout FETCH_HEAD`, it is
+  on a DETACHED HEAD**, and `git push origin main` from there is a no-op. Use
+  `git push origin HEAD:main`. This cost one push here.
 
 ## What is in place regardless
 
-`run_all_gates.sh` now fingerprints the tracked tree (file count **and** digest) before
-any gate and after all 38, and fails if it moved. The count alone is insufficient:
+`run_all_gates.sh` fingerprints the tracked tree (file count **and** digest) before any
+gate and after all of them, and fails if it moved. The count alone is insufficient:
 `git ls-files` counts tracked paths whether or not the file is *present*, so a deletion
-is invisible to a count. Proven load-bearing by deleting a tracked source file during a
-run.
+is invisible to a count. Both are taken because they fail differently.
 
 ## Why no fix was attempted
 
-The cause is not known. A speculative patch to a gate would be a fabrication in the shape
-of a code change. The honest state is: **detected, cause unknown, caught if it recurs.**
+The cause is still not proven, and a speculative patch to a gate — or to a tool in
+another lane — would be a fabrication in the shape of a code change. What changed is
+that the hypothesis is no longer vague: it is a named suspect, observed 3/3, with an
+experiment that exonerated this project. The honest state is: **detected, cause still
+unproven, suspect named, and the working practice changed so the hazard cannot reach
+the work.**
