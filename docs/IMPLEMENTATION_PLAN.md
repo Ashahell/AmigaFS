@@ -1794,6 +1794,66 @@ and written off a cell as unreachable. It is the same move as the "ADFlib RDB
 support is experimental" claim retired in M40 — testing an inherited limitation
 instead of inheriting it.
 
+### M43, resolved: the gate IS load-bearing, and the "unexplained negative" was a search failure
+
+Part 1 of this milestone recorded an honest negative: a casting mutant
+`(uint16_t)be32(...)` compiles cleanly, should change the reported uid from
+`0x1234` to `0x5678`, and the gate still passed. I said I had not explained why
+and declined to claim the gate mutant-proven.
+
+**Explained, and the explanation is worse than the mystery.** The gate is
+load-bearing. The mutant had been applied at the wrong site.
+
+`fill_stat()` in the FUSE shell takes an **`afs_fileheader_t`**, and its `uid` is
+filled by `afs_parse_fileheader()`:
+
+    src/lib/blocktypes.c:65     out->uid        = be16(blk + bsize - 196);
+
+I had mutated `src/lib/file.c:175`, which fills an **`afs_filestat_t`** for
+`afs_file_stat()` — a different struct, on a different code path, consumed by the
+CLI, never by the mount.
+
+**And the reason I thought there were only two sites** is the part worth keeping.
+My inventory grep was:
+
+    grep -rn "\.uid = \|\->uid = " src/lib/*.c
+
+The real line is `out->uid        = ` — **eight spaces** after `uid`, because the
+parser aligns its assignments in a column. My pattern required exactly one. So it
+could not match the one line that mattered, reported the field absent from that
+file, and left me confident the inventory was complete. I then mutated one of the
+two sites it *had* found, neither of which was the mount's, and read the
+unchanged result as evidence about the code rather than about my search.
+
+    src/lib/blocktypes.c:65    out->uid        = be16(blk + bsize - 196);   <- the mount's
+    src/lib/blocktypes.c:109   r->uid     = be16(blk + off + 12);          <- a different offset
+    src/lib/file.c:175         out->uid = be16(b + bsize - 196);          <- afs_filestat_t, the CLI
+    src/lib/dir.c:1009         rec.uid = be16(hb + bs - 196);             <- dirent (`.` not `->`)
+
+With the mutant at the real site the gate fails exactly as predicted:
+
+    with the option : uid/gid = 22136 22136
+    amiga_ids reports the patched stored ids  FAIL (want '4660 22136', got '22136 22136')
+
+So there are **four** uid reads, not two, and a positive search had to be run with
+a pattern loose enough to find them (`\->uid +=`).
+
+**The general form, and it is its own rule (285):** *a negative search result is
+only evidence of absence if the search has been shown to find a known-present
+case.* An absent-looking answer from a pattern nobody has seen match anything is
+indistinguishable from an absent thing — and the failure is silent, because the
+pattern looks reasonable and the count it returns looks like a finding. This is
+the same shape as rule 274's "a check that has never been green teaches the
+operator to read past the line that announces it", one level down: the check
+returns a plausible value rather than nothing at all, which makes it harder to
+notice, not easier.
+
+The cost here was an entire milestone's load-bearing claim resting on a mutant
+that was never in the code under test — and the tell was available the whole
+time, in the fact that the mutant had *provably* compiled, *provably* rebuilt,
+and changed nothing at all. **A mutant that changes nothing is more likely to be
+in the wrong place than to be a weak test**, and the first response should be to
+re-verify the inventory, not to question the value.
 ### M40 — the "ADFlib RDB support is experimental" claim is wrong for this purpose (2026-10-16)
 
 The last open risk. The M7 gate used **amitools `rdbtool` alone**, because
