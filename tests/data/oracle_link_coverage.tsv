@@ -1,6 +1,7 @@
-oracle	src/lib exit 0, unadf extracts into cwd
+oracle	unadf extracts into cwd; amitools xdftool list
 fixture	testffs.adf (pristine, no writes)
-oracle_sees	10
+adflib_unadf_extracts	10
 we_report	14
+amitools_volume	REFUSED rc=3, 0 entries listed; refuses on Sub_Type fffffffc (-4, ADF_ST_LFILE: a HARD LINK to a file)
 no_external_oracle	hlink_blue hlink_dir1 hlink_dir2 slink_dir1
-reason	amitools xdftool: Unsupported Dir Block, Sub_Type fffffffc (-4, ADF_ST_LFILE); unadf skips silently
+scope	PER-VOLUME: one hard link makes amitools blind to every entry on the volume, not only the links

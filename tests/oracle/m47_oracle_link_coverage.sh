@@ -99,13 +99,44 @@ note "our listing is a superset of the oracle's" "$mn >= $on, nothing lost"
 
 extra=$(comm -13 "$W/oracle.txt" "$W/ours.txt")
 ecount=$(printf '%s' "$extra" | grep -c . || true)
+
+# The SECOND oracle, and the finding that turned this from "four entries have no
+# oracle" into something larger. Measured on this same fixture: unadf extracts 10
+# entries, while xdftool lists NOTHING at all -- not the four links, and not the
+# ten plain entries either. One hard link makes the WHOLE VOLUME unreadable to
+# amitools:
+#
+#     'list' FSError: Unsupported Dir Block(8):block=Block:@1222,Sub_Type: fffffffc
+#     rc=3, zero entries listed
+#
+# So the gap is PER-VOLUME, not per-entry. On any volume carrying a hard link,
+# ADFlib is the only oracle left -- and ADFlib does not expose links. That is a
+# much stronger constraint on the verification strategy than "four entries are
+# uncovered", and it is why this is recorded rather than left for a reader to
+# infer from two greens.
+amitools_state="absent"
+if command -v xdftool >/dev/null 2>&1; then
+    xo=$(cd "$W" && xdftool "$FIX" list 2>&1); xrc=$?
+    if [ $xrc -eq 0 ]; then
+        amitools_state="lists $(printf '%s\n' "$xo" | grep -c .) lines"
+    else
+        sub=$(printf '%s\n' "$xo" | sed -n 's/.*Sub_Type: *\([0-9a-f]*\).*/\1/p' | head -1)
+        case "$sub" in
+            fffffffc) sub="$sub (-4, ADF_ST_LFILE: a HARD LINK to a file)" ;;
+            *)        sub="${sub:-unknown}" ;;
+        esac
+        amitools_state="REFUSED rc=$xrc, 0 entries listed; refuses on Sub_Type $sub"
+    fi
+fi
+
 {
-    printf 'oracle\tsrc/lib exit 0, unadf extracts into cwd\n'
+    printf 'oracle\tunadf extracts into cwd; amitools xdftool list\n'
     printf 'fixture\ttestffs.adf (pristine, no writes)\n'
-    printf 'oracle_sees\t%s\n' "$on"
+    printf 'adflib_unadf_extracts\t%s\n' "$on"
     printf 'we_report\t%s\n' "$mn"
+    printf 'amitools_volume\t%s\n' "$amitools_state"
     printf 'no_external_oracle\t%s\n' "$(printf '%s' "$extra" | tr '\n' ' ')"
-    printf 'reason\tamitools xdftool: Unsupported Dir Block, Sub_Type fffffffc (-4, ADF_ST_LFILE); unadf skips silently\n'
+    printf 'scope\tPER-VOLUME: one hard link makes amitools blind to every entry on the volume, not only the links\n'
 } > "$W/table.tsv"
 
 if [ ! -f "$BASE" ]; then
@@ -153,11 +184,16 @@ else
 fi
 
 echo
-echo "  What this means for the suite, stated plainly: the $ecount entr(ies) above"
-echo "  have NO external oracle. m25_fuse_link and m32_link_unlink verify the link"
-echo "  write and unlink paths through OUR OWN reader, so their green is internally"
-echo "  consistent and externally unbacked. That is a known, measured limitation --"
-echo "  not an oversight -- and this gate is what keeps it from being forgotten."
+echo "  What this means for the suite, stated plainly. On THIS volume:"
+echo "    - the $ecount entr(ies) above have no external oracle at all;"
+echo "    - amitools sees $amitools_state"
+echo "    - so ADFlib is the only oracle that reaches this volume, and ADFlib does"
+echo "      not expose links."
+echo
+echo "  That makes m25_fuse_link and m32_link_unlink's green internally consistent"
+echo "  and externally unbacked -- a known, measured limitation, not an oversight."
+echo "  This gate is what keeps it from being forgotten, and what will notice if"
+echo "  either oracle ever gains link support."
 echo
 if [ "$fails" -eq 0 ]; then
     echo "M47 gate: PASS ($ecount entr(ies) with no external oracle, pinned)"
