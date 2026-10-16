@@ -32,9 +32,26 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 cd "$ROOT" || exit 2
 
-SAMPLE=(m4_gate m8_gate m12_cli_rdb m24_unadf_link_blindness
-        m26_root_dircache_survives m30_fixtures_valid_to_the_oracle
-        m37_intl_dirc)
+# The sample is COMPUTED from the tree, never hand-listed.
+#
+# The first version named seven gates by hand, when the suite had 33. By the time
+# the suite reached 35 it was missing m39_blockio_fuzz -- the libFuzzer gate that
+# writes crash-<hash> into the CURRENT DIRECTORY, which is the exact failure this
+# gate exists to catch, discovered here because m39 had written one into the repo
+# root and `git add` had committed it. A hand-list goes stale silently: nothing
+# fails when a new gate is added, it just quietly escapes the check.
+#
+# So the sample is every gate that could plausibly touch the tree, found by
+# looking for the tools that do it. Adding a gate that uses unadf, clang, FUSE or
+# git therefore joins the sample automatically, and one that does none of those is
+# cheap to omit because it cannot produce debris.
+#
+# This gate itself is excluded: it runs git, so including itself would recurse.
+SELF=m42_no_repo_writes
+mapfile -t SAMPLE < <(
+    grep -lE 'unadf|clang|fsanitize=fuzzer|amigafs-fuse|git ' tests/oracle/*.sh \
+      | xargs -n1 basename | sed 's/\.sh$//' | grep -v "^${SELF}$" | sort -u
+)
 
 digest() {
     # one value covering both things that matter: tracked content (including any
