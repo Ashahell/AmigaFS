@@ -469,6 +469,25 @@ static uint8_t *build_writable_img_free(unsigned free_blocks) {
     if (!img) return NULL;
     memset(map, 0, sizeof map);            /* 0 = allocated */
     for (unsigned i = 0; i < IMG_BLOCKS; i++) afs_bitmap_set(map, i);
+    /* The structural blocks MUST be marked allocated. The first loop marks every
+     * block free, and the second loop below `continue`s past exactly these two,
+     * so without this they stayed FREE -- which is not merely untidy, it is the
+     * defect M34's guard exists to catch: block 880 is the rootblock and 881 is
+     * the bitmap page, both permanently referenced, and a map that calls them
+     * free would hand them to the first file created.
+     *
+     * M29 again, and the third time in this file: a fixture sharing a mistake
+     * with the code, producing a suite that agreed with itself. The sibling
+     * build_writable_img() above has the correct inverted form -- it only marks
+     * the NON-structural blocks free. This one built the map the other way round
+     * and forgot to put the structural blocks back.
+     *
+     * It passed every one of its 171 checks until M34's guard asked the
+     * question, which is the whole argument for the guard. */
+    afs_bitmap_clear(map, 0);
+    afs_bitmap_clear(map, 1);
+    afs_bitmap_clear(map, IMG_ROOT);
+    afs_bitmap_clear(map, IMG_BM);
     for (unsigned i = 2; i < IMG_BLOCKS; i++) {
         if (i == IMG_ROOT || i == IMG_BM) continue;
         avail++;
