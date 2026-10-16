@@ -39,3 +39,21 @@ void afs_translate_ids(uint32_t mount_uid, uint32_t mount_gid,
 void afs_now_amiga(uint32_t *days, uint32_t *mins, uint32_t *ticks);
 
 #endif /* AMIGAFS_TRANSLATE_H */
+
+/* Turn a library error message into the errno the kernel will see, and NOTHING
+ * else. fuse_reply_err() carries an errno and nothing more, so at all 101 call
+ * sites in the FUSE shell the message is DISCARDED. That is the FUSE protocol,
+ * not an oversight -- but it means the library's diagnostics ("dir-cache chain
+ * corrupt", "file too large (past 4 GiB)") reach nobody. Of the 32 distinct
+ * messages the library can produce, 24 arrived as a bare EIO, which says
+ * "something went wrong" and names nothing.
+ *
+ * EIO is therefore made to mean what it actually means -- unclassified -- and it
+ * is the ONE result allowed to speak: it explains itself on stderr. Classified
+ * outcomes stay silent, because a busy directory generates ENOENT and EEXIST
+ * constantly and logging those would train the reader to ignore the channel.
+ *
+ * It lives in the library rather than in the FUSE shell because it is a pure
+ * function with 101 call sites, and a function that cannot be linked by a test
+ * is a function that is not tested. */
+int afs_err_to_errno(const char *msg);

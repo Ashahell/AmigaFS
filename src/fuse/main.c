@@ -41,6 +41,7 @@
 #include "amigafs/links.h"
 #include "amigafs/rdb.h"
 #include "amigafs/translate.h"
+#include "amigafs/translate.h"
 #include "amigafs/volume.h"
 
 #define AMIGAFS_OPT(t, p) { t, offsetof(struct options, p), 1 }
@@ -524,19 +525,6 @@ static void afs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
  * Order matters: the more specific phrases are tested first ("is a directory"
  * before anything that merely contains "directory").
  */
-static int err_to_errno(const char *msg) {
-    if (!msg || !msg[0]) return EIO;
-    if (strstr(msg, "already exists"))   return EEXIST;
-    if (strstr(msg, "not empty"))       return ENOTEMPTY;
-    if (strstr(msg, "not found"))       return ENOENT;
-    if (strstr(msg, "is a directory"))  return EISDIR;
-    if (strstr(msg, "not a directory")) return ENOTDIR;
-    if (strstr(msg, "into itself"))     return EINVAL;
-    if (strstr(msg, "link"))            return EOPNOTSUPP;
-    if (strstr(msg, "name"))            return EINVAL;
-    if (strstr(msg, "full") || strstr(msg, "no free block")) return ENOSPC;
-    return EIO;
-}
 
 static int refuse_if_ro(fuse_req_t req);
 
@@ -799,7 +787,7 @@ static void afs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 
     if (afs_file_create(vol, pblk, name, strlen(name), &hdr,
                         err, sizeof err) != 0) {
-        fuse_reply_err(req, err_to_errno(err));
+        fuse_reply_err(req, afs_err_to_errno(err));
         return;
     }
     fi->fh = (fi->flags & O_APPEND) ? FH_APPEND : 0;
@@ -835,7 +823,7 @@ static void afs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf,
     if (afs_file_write_range(vol, blk, buf, size, at, err, sizeof err) != 0) {
         /* a full volume is the common real failure and deserves its own errno;
          * everything else here is an I/O or structure refusal */
-        fuse_reply_err(req, err_to_errno(err));
+        fuse_reply_err(req, afs_err_to_errno(err));
         return;
     }
     fuse_reply_write(req, size);
@@ -852,7 +840,7 @@ static void afs_ll_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name,
     char err[256] = {0};
     if (afs_dir_mkdir(g_parts[vi].vol, pblk, name, strlen(name), &nb,
                       err, sizeof err) != 0) {
-        fuse_reply_err(req, err_to_errno(err));
+        fuse_reply_err(req, afs_err_to_errno(err));
         return;
     }
     reply_entry_block(req, vi, nb, NULL, 0);
@@ -880,7 +868,7 @@ static void afs_ll_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
         if (afs_dir_rmdir(vol, pblk, name, strlen(name), err, sizeof err) != 0) {
             /* non-empty is ENOTEMPTY, not EIO: `rm -r` and every POSIX caller
              * branch on it */
-            fuse_reply_err(req, err_to_errno(err));
+            fuse_reply_err(req, afs_err_to_errno(err));
             return;
         }
     } else if (e.kind == AFS_BLOCK_LINKFILE || e.kind == AFS_BLOCK_SOFTLINK) {
@@ -902,7 +890,7 @@ static void afs_ll_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
          * impossible. */
         if (afs_link_remove(vol, pblk, name, strlen(name),
                             err, sizeof err) != 0) {
-            fuse_reply_err(req, err_to_errno(err));
+            fuse_reply_err(req, afs_err_to_errno(err));
             return;
         }
     } else {
@@ -970,7 +958,7 @@ static void afs_ll_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent,
     uint32_t link = 0;
     if (afs_file_link(vol, nblk, newname, strlen(newname), tblk,
                       &link, err, sizeof err) != 0) {
-        fuse_reply_err(req, err_to_errno(err));
+        fuse_reply_err(req, afs_err_to_errno(err));
         return;
     }
     /* A `.link` op accepts ONLY fuse_reply_entry or fuse_reply_err
@@ -1018,7 +1006,7 @@ static void afs_ll_symlink(fuse_req_t req, const char *target, fuse_ino_t parent
     uint32_t link = 0;
     if (afs_symlink(vol, pblk, name, strlen(name), target, strlen(target),
                     &link, err, sizeof err) != 0) {
-        fuse_reply_err(req, err_to_errno(err));
+        fuse_reply_err(req, afs_err_to_errno(err));
         return;
     }
     /* Same rule as .link and mkdir: a bare fuse_reply_err(req, 0) is not an
@@ -1035,7 +1023,7 @@ static void afs_ll_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
     afs_volume_t *vol = g_parts[vi].vol;
     char err[256] = {0};
     if (afs_dir_rmdir(vol, pblk, name, strlen(name), err, sizeof err) != 0) {
-        fuse_reply_err(req, err_to_errno(err));
+        fuse_reply_err(req, afs_err_to_errno(err));
         return;
     }
     fuse_reply_err(req, 0);
@@ -1064,7 +1052,7 @@ static void afs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
     char err[256] = {0};
     if (afs_dir_rename(g_parts[vi].vol, sblk, name, strlen(name),
                        nblk, newname, strlen(newname), err, sizeof err) != 0) {
-        fuse_reply_err(req, err_to_errno(err));
+        fuse_reply_err(req, afs_err_to_errno(err));
         return;
     }
     fuse_reply_err(req, 0);
@@ -1113,7 +1101,7 @@ static void afs_ll_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
     }
     if (afs_file_write_all(vol, blk, buf, want, err, sizeof err) != 0) {
         free(buf);
-        fuse_reply_err(req, err_to_errno(err));
+        fuse_reply_err(req, afs_err_to_errno(err));
         return;
     }
     free(buf);

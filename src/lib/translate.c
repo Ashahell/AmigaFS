@@ -72,3 +72,43 @@ void afs_now_amiga(uint32_t *days, uint32_t *mins, uint32_t *ticks) {
     if (mins) *mins = (uint32_t)(((uint64_t)since % 86400u) / 60u);
     if (ticks) *ticks = (uint32_t)(((uint64_t)since % 60u) * TICKS_PER_SEC);
 }
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+
+/* Turn a library message into the errno the kernel will see, and NOTHING else.
+ *
+ * fuse_reply_err() carries an errno and nothing more, so at all 101 call sites
+ * the message is DISCARDED. That is the FUSE protocol, not an oversight -- but it
+ * means the library's careful diagnostics ("dir-cache chain corrupt", "file too
+ * large (past 4 GiB)") reach nobody. Measured over the 32 distinct messages the
+ * library can produce, 24 arrive as a bare EIO, which says "something went wrong"
+ * and names nothing.
+ *
+ * So EIO is made to mean what it actually means -- "unclassified" -- and it is the
+ * ONE result that is allowed to speak. Classified outcomes stay silent, because a
+ * busy directory generates ENOENT and EEXIST constantly and logging those would
+ * train the reader to ignore the channel. EIO is the bucket where this code did
+ * not understand its own failure, and that is exactly when a human is needed.
+ *
+ * Four messages have an unambiguous errno and were being flattened by the
+ * fall-through: out of memory is ENOMEM, and the two "too large" cases are EFBIG,
+ * which is POSIX's exact errno for them. */
+int afs_err_to_errno(const char *msg) {
+    if (!msg || !msg[0]) return EIO;
+    if (strstr(msg, "already exists"))   return EEXIST;
+    if (strstr(msg, "not empty"))       return ENOTEMPTY;
+    if (strstr(msg, "not found"))       return ENOENT;
+    if (strstr(msg, "is a directory"))  return EISDIR;
+    if (strstr(msg, "not a directory")) return ENOTDIR;
+    if (strstr(msg, "into itself"))     return EINVAL;
+    if (strstr(msg, "link"))            return EOPNOTSUPP;
+    if (strstr(msg, "name"))            return EINVAL;
+    if (strstr(msg, "full") || strstr(msg, "no free block")) return ENOSPC;
+    if (strstr(msg, "out of memory"))   return ENOMEM;
+    if (strstr(msg, "too large"))       return EFBIG;
+
+    /* Unclassified: say so, once, with the reason. */
+    fprintf(stderr, "amigafs: %s (reported as I/O error)\n", msg);
+    return EIO;
+}

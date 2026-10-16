@@ -15,6 +15,12 @@
 #include "amigafs/translate.h"
 
 #include <time.h>
+#include <unistd.h>   /* dup, dup2, close, unlink */
+#include <fcntl.h>    /* open */
+#include <errno.h>    /* ENOMEM, EFBIG, EIO, ... */
+#include <stdio.h>
+#include <string.h>
+#include <sys/types.h>
 
 static void test_permission_bits(void) {
     struct stat st;
@@ -94,10 +100,97 @@ static void test_uid_gid_policy(void) {
     CHECK_EQ_U(st.st_gid, 4343u, "amiga_ids exposes the stored gid");
 }
 
+/* afs_err_to_errno: the message -> errno mapping the FUSE shell applies at all
+ * 101 fuse_reply_err sites, where the message itself is DISCARDED.
+ *
+ * This is a unit test because the function USED TO BE A STATIC IN A FILE WITH A
+ * main() -- 101 call sites and no way to test any of them. Moving it into the
+ * library is what made this test writable.
+ *
+ * The behavioural half matters as much as the mapping: a classified error must
+ * be SILENT. A busy directory produces ENOENT and EEXIST constantly, and a
+ * channel that speaks on every expected miss is a channel nobody reads -- which
+ * is the whole reason EIO is the only result allowed to explain itself. */
+
+/* Run fn(msg) with stderr captured, and report what it wrote. Returns the
+ * function's return value; *wrote gets the byte count written to stderr. */
+static int err_stderr_probe(int (*fn)(const char *), const char *msg,
+                            size_t *wrote)
+{
+    char tmpl[] = "/tmp/amigafs-errprobe.XXXXXX";
+    int fd = mkstemp(tmpl);
+    int saved = dup(STDERR_FILENO);
+    ssize_t n;
+    if (fd < 0) { *wrote = (size_t)-1; return fn(msg); }
+    fflush(stderr);
+    dup2(fd, STDERR_FILENO);
+    (void)fn(msg);
+    fflush(stderr);
+    dup2(saved, STDERR_FILENO);
+    close(saved);
+    lseek(fd, 0, SEEK_SET);
+    n = read(fd, tmpl, 0);          /* size is what matters, not the content */
+    (void)n;
+    *wrote = (size_t)lseek(fd, 0, SEEK_END);
+    close(fd);
+    unlink(tmpl);
+    return 0;
+}
+
+static void test_error_message_mapping(void) {
+    size_t wrote = 0;
+
+    /* the four that were being flattened by the fall-through */
+    CHECK_EQ_U(afs_err_to_errno("out of memory"), ENOMEM,
+               "out of memory is ENOMEM, not EIO");
+    CHECK_EQ_U(afs_err_to_errno("file too large (past 4 GiB)"), EFBIG,
+               "a file past 4 GiB is EFBIG -- POSIX's exact errno for it");
+    CHECK_EQ_U(afs_err_to_errno(
+                   "bitmap extension chain not supported (volume too large)"),
+               EFBIG, "a volume too large for the chain is EFBIG too");
+
+    /* the pre-existing classifications still hold */
+    CHECK_EQ_U(afs_err_to_errno("'x' already exists"), EEXIST, "already exists");
+    /* A word about this test's first draft: it used "cannot find name" and got
+     * EINVAL, because that string contains the substring "name" and the rule for
+     * it is checked before anything else. The mapping is a first-match-over-
+     * substrings scan, so THE WORDING OF EVERY LIBRARY MESSAGE IS LOAD-BEARING:
+     * a message that happens to contain two keywords gets whichever rule comes
+     * first, and the loser is unreachable for that message. Worth knowing before
+     * adding a message that reads well and classifies wrongly. */
+    /* the library's ACTUAL wording, not one invented here: src/lib emits
+     * "'%.*s' not found", and an invented string tests nothing. Both earlier
+     * drafts of this assertion used invented text and were wrong twice. */
+    CHECK_EQ_U(afs_err_to_errno("'nosuch' not found"), ENOENT, "not found");
+    CHECK_EQ_U(afs_err_to_errno("directory not empty"), ENOTEMPTY, "not empty");
+    CHECK_EQ_U(afs_err_to_errno("'d' is a directory"), EISDIR, "is a directory");
+    CHECK_EQ_U(afs_err_to_errno("volume full: no free block"), ENOSPC, "full");
+    CHECK_EQ_U(afs_err_to_errno("cannot delete links yet"), EOPNOTSUPP, "link");
+
+    /* an unclassified message is EIO, and EIO alone explains itself */
+    CHECK_EQ_U(afs_err_to_errno("dir-cache chain corrupt"), EIO,
+               "an unclassified message is EIO");
+    err_stderr_probe(afs_err_to_errno, "dir-cache chain corrupt", &wrote);
+    CHECK(wrote > 0, "an unclassified message DOES explain itself (%zu bytes)", wrote);
+
+    /* and classified results must be silent, or the channel is worthless */
+    err_stderr_probe(afs_err_to_errno, "'x' already exists", &wrote);
+    CHECK_EQ_U((unsigned long)wrote, 0ul, "a classified error stays silent");
+    err_stderr_probe(afs_err_to_errno, "volume full: no free block", &wrote);
+    CHECK_EQ_U((unsigned long)wrote, 0ul, "ENOSPC stays silent (it is expected)");
+    err_stderr_probe(afs_err_to_errno, "'nosuch' not found", &wrote);
+    CHECK_EQ_U((unsigned long)wrote, 0ul, "ENOENT stays silent (a busy dir is normal)");
+
+    /* a NULL or empty message is EIO, not a crash */
+    CHECK_EQ_U(afs_err_to_errno(NULL), EIO, "NULL message is EIO");
+    CHECK_EQ_U(afs_err_to_errno(""), EIO, "empty message is EIO");
+}
+
 int main(void) {
     printf("translate\n");
     test_permission_bits();
     test_dates_utc();
     test_uid_gid_policy();
+    test_error_message_mapping();
     TEST_REPORT();
 }
