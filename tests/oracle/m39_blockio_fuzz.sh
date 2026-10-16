@@ -66,8 +66,45 @@ echo "M39: running $RUNS inputs"
 # its evidence somewhere deliberate, not in the tree.
 timeout 900 "$BIN" "$CORP" -runs="$RUNS" -max_len=65536 \
     -timeout=10 -rss_limit_mb=2048 -print_final_stats=1 \
-    >"$W/out.log" 2>&1
+    -artifact_prefix="$W/" >"$W/out.log" 2>&1
 rc=$?
+
+# Verify the redirect, rather than trusting that it is still there.
+#
+# Removing -artifact_prefix from the line above breaks NOTHING observable: the
+# gate still passes, and m42 still passes, because the point of the flag is to
+# change behaviour only when libFuzzer FINDS A CRASH -- and on a healthy
+# corpus it never finds one. So the flag was undefended, and a gate this suite
+# relies on to keep its own debris out of the tree could lose it silently.
+#
+# Worse, the check that "m42 catches a missing artifact_prefix" is FALSE, and
+# only for a reason worth writing down: it only catches one when the target also
+# CRASHES, because a clean run writes no artifact at all. Demonstrated -- dropping
+# the flag alongside a crashing mutant was caught; dropping it alone was not.
+# An artifact redirect cannot be verified by waiting for the artifact.
+#
+# So it is asserted here instead: the flag must be present on the invocation, and
+# after the run the repository root must be free of libFuzzer's artifact names.
+debris=$(ls crash-* timeout-* oom-* leak-* 2>/dev/null | head -5)
+if [ ! -f "$W/.prefix-ok" ]; then
+    if grep -q -- '-artifact_prefix=' "$0" && grep -q -- '-artifact_prefix=' \
+        <(sed -n '/timeout .*"\$BIN"/,/2>&1/p' "$0"); then
+        : > "$W/.prefix-ok"
+    else
+        echo "M39 gate: FAIL -- the fuzz run has no -artifact_prefix"
+        echo "    libFuzzer writes crash-*/timeout-*/oom-* into the CURRENT directory by"
+        echo "    default, and this gate runs from the repository root. On a healthy"
+        echo "    corpus it never finds one, so the missing flag is invisible here --"
+        echo "    which is why it is asserted rather than observed."
+        exit 1
+    fi
+fi
+if [ -n "$debris" ]; then
+    echo "M39 gate: FAIL -- the fuzz run left libFuzzer artifacts in the tree:"
+    echo "$debris" | sed 's/^/    /'
+    echo "    Move them out, or restore -artifact_prefix on the run line."
+    exit 1
+fi
 
 if [ $rc -ne 0 ]; then
     echo "M39 gate: FAIL -- the run exited $rc (libFuzzer exits non-zero on a finding)"
