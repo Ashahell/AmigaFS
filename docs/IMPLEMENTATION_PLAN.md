@@ -1648,6 +1648,67 @@ a volume where the list is *right*, that is the case that must refuse.
   like a size threshold and turned out to be `2..601` vs `602..1201` against a
   fixture whose live blocks all sit above 880. The numbers named the cause.
 
+### M37 — INTL/DIRC exactness: the first oracle-differenced round trip on those types
+
+Closes the longest-standing open risk in the plan ("INTL/DIRC exactness: the
+FAQ is thin here"). Nothing in the suite had ever generated a volume of these
+types — every fixture is DOS\1, DOS\3 or DOS\5 by way of however it was made. The
+generator is the oracle's own `adfformat`.
+
+**Obtained, differenced against the oracle:**
+
+| type | volume | result |
+|---|---|---|
+| `-t 0` | OFS | round trip **byte-identical**, no rebuild needed |
+| `-t 1` | FFS | round trip **byte-identical**, no rebuild needed |
+| `-t 3` | FFS/INTL | round trip **byte-identical**, no rebuild needed |
+| `-t 5` | FFS/DIRC&INTL | round trip **byte-identical**, after one rebuild |
+| `-t 7` | FFS/DIRC | refused **on purpose** — AmigaOS 3.2 long-filename type |
+| `-t 2/4/6` | OFS+INTL | **cannot be generated at all** |
+
+For each type the gate writes a file, a 3000-byte binary and a nested file, then
+lets **`unadf` extract them** and compares the extraction byte for byte against
+the source. The listing is compared too. The oracle does the reading; nothing is
+self-attested.
+
+### A limit of the oracle's tool, not of the format
+
+`-t 2`, `-t 4` and `-t 6` — every **OFS+INTL** combination — are refused by
+`adfformat` itself, at `examples/adfformat.c:261`:
+
+```c
+options->fsType > 7 ||
+( options->fsType > 0 && options->fsType % 2 == 0 )
+```
+
+That is ADFlib declining to *create* those volumes. It says nothing about whether
+they are valid, and it means the OFS+INTL cell of this risk **cannot be closed
+with the pinned oracles**. Recorded as still open rather than skipped, because a
+silently dropped cell is how a risk list becomes fiction. Closing it needs either
+an ADFlib that can write them, amitools' `xdftool`, or a hand-built image
+cross-checked against the FAQ's layout tables.
+
+### A real user-visible consequence of shipping the M34 guard
+
+A freshly formatted **DIRC** volume is born with a map that disagrees with its
+own tree: `adfformat` does not mark the dir-cache block used. So the first
+`mkdir` on any DIRC volume from this formatter is refused:
+
+```
+afs: cannot mkdir SUB: the allocation map disagrees with the directory tree:
+block 882 is referenced but marked free ... Rebuild the map first:
+afs bitmap-rebuild <image> --yes
+```
+
+and succeeds immediately after that one command. **Every DIRC volume formatted by
+this oracle needs one `bitmap-rebuild` before its first write.** That is the guard
+working exactly as specified, and the message naming a remedy that exists is the
+whole point — but it is a behaviour change for DIRC volumes, so it is pinned in
+the gate rather than left for a user to discover.
+
+Note the same shape appears in the non-DIRC types (`-t 0`, `-t 1`, `-t 3`), where
+the rebuild is harmless and the gate applies it to all four so that "the rebuild
+is safe everywhere" is asserted rather than assumed.
 ## M33 — making a leak visible, and what that immediately found (2026-10-15)
 
 M32 ended with a defect nothing could see: a leaked block is invisible because
@@ -2004,7 +2065,11 @@ Owner decisions, recorded. These are settled, not open.
 
 ## 7. Open risks
 
-- **INTL/DIRC exactness:** the FAQ is thin here. Generate `-t 2..5` images, diff against the oracle, and record any oracle disagreement.
+- **INTL/DIRC exactness — CLOSED for everything the pinned oracles can
+  produce (M37).** `-t 0/1/3/5` round-trip byte-identically against `unadf`.
+  **STILL OPEN: OFS+INTL (`-t 2/4/6`)**, because `adfformat` refuses to create
+  them (`examples/adfformat.c:261`) — a limit of the oracle's tool, not of the
+  format. Needs another generator or a hand-built image.
 - **ADFlib RDB support is experimental:** see the M7 gate.
 - **Hostile images** (`ffdisk0049.adf`, fuzzed blocks): every pointer is bounds-checked, every chain is cycle-guarded, and nothing in the core aborts. Add a libFuzzer target over `blockio` with a memory backend after M4.
 - **Directory-block GID width (FAQ inconsistency):** the FAQ lists the file header's `GID` as `ushort` at `BSIZE-194`. The directory block lists `UID` as `ushort` at `BSIZE-196` but `GID` as `ulong` at `BSIZE-194`, a 4-byte field overlapping the 2-byte one before it. This is a spec error, not an established fact. Until it is settled, `-o amiga_ids` (D7) exposes directory GID as the 16-bit value and records the question. Settle it by hex-dumping a directory block from a MultiUser-formatted image, cross-checked against ADFlib's `bDirBlock` and amitools' dir-block layout. It was scheduled for M2, and M2 closed without settling it. It is now a **blocker for shipping `-o amiga_ids` in M8**: until it is closed, `amiga_ids` is not offered.
