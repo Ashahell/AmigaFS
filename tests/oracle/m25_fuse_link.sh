@@ -46,7 +46,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-[ -x "$BIN/amigafs-fuse" ] || { echo "SKIP: fuse binary not built"; exit 0; }
+[ -x "$BIN/amigafs-fuse" ] || { echo "SKIP: fuse binary not built"; exit 77; }
 [ -f "$FIX" ]              || { echo "FAIL: fixture missing"; exit 1; }
 
 before_sum=$(sha256sum "$FIX" | cut -d' ' -f1)

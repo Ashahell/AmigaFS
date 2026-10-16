@@ -80,12 +80,12 @@ unmount() {
 echo "M15 gate: FUSE writes (-o rw)"
 
 for t in "$BIN/afs" "$BIN/amigafs-fuse"; do
-    [ -x "$t" ] || { echo "M15 gate: SKIP (build first)"; exit 0; }
+    [ -x "$t" ] || { echo "M15 gate: SKIP (build first)"; exit 77; }
 done
-[ -e /dev/fuse ] || { echo "M15 gate: SKIP (no /dev/fuse)"; exit 0; }
-command -v fusermount3 >/dev/null || { echo "M15 gate: SKIP (no fusermount3)"; exit 0; }
+[ -e /dev/fuse ] || { echo "M15 gate: SKIP (no /dev/fuse)"; exit 77; }
+command -v fusermount3 >/dev/null || { echo "M15 gate: SKIP (no fusermount3)"; exit 77; }
 for f in testffs.adf a590_WD93028XA_6parts.hdd; do
-    [ -f "$ROOT/tests/fixtures/$f" ] || { echo "M15 gate: SKIP (fixtures absent)"; exit 0; }
+    [ -f "$ROOT/tests/fixtures/$f" ] || { echo "M15 gate: SKIP (fixtures absent)"; exit 77; }
 done
 mkdir -p "$WORK/mnt"
 

@@ -55,7 +55,7 @@ fails=0
 bad() { printf '  %-52s FAIL (%s)\n' "$1" "$2"; fails=$((fails + 1)); }
 note() { printf '  %-52s %s\n' "$1" "$2"; }
 
-[ -x "$ROOT/build/afs" ] || { echo "M50 gate: SKIP -- build/afs not built"; exit 0; }
+[ -x "$ROOT/build/afs" ] || { echo "M50 gate: SKIP -- build/afs not built"; exit 77; }
 [ -f "$FIX" ]            || { echo "M50 gate: FAIL -- fixture missing: $FIX"; exit 1; }
 
 echo "=== M50 gate (non-AmigaDOS descriptors are refused, by name) ==="

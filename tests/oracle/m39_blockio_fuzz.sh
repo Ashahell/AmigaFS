@@ -26,7 +26,7 @@ RUNS=${FUZZ_RUNS:-20000}
 
 if ! command -v "$CC" >/dev/null 2>&1; then
     echo "M39 SKIP: $CC not on PATH"
-    exit 0
+    exit 77
 fi
 
 W=$(mktemp -d /tmp/amigafs-m39.XXXXXX)

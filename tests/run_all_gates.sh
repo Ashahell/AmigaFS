@@ -60,7 +60,17 @@ declare -a RESULTS=()
 # So the gate's OUTPUT decides the verdict class, not just its exit code. The exit
 # code cannot, because skipping is implemented as `exit 0` -- which is correct for a
 # gate (an absent optional tool is not a failure) and wrong for a summary.
-n_pass=0; n_skip=0; n_fail=0; n_part=0
+n_pass=0; n_skip=0; n_fail=0; n_part=0; n_legacy=0; legacy_list=""
+# 77 is the automake convention for "skipped", and this repo already used it once --
+# m18_bitmap_rebuild.sh has exited 77 for a missing oracle since it was written, and
+# until now NOTHING read it. A gate signalling machine-readably into a void is worse
+# than one that does not bother: it looks like the contract exists.
+#
+# So the exit code is authoritative, and the wording check becomes a CROSS-CHECK that
+# reports disagreement rather than being the primary mechanism. Two detectors that
+# must agree is stronger than either alone: if a gate is reworded so its skip line no
+# longer starts a line, rc 77 still classifies it correctly, and if some gate skips
+# without using 77 the harness says so by name instead of quietly trusting a string.
 # Two distinct shapes of "did not test everything", and they are not the same thing:
 #   - the WHOLE gate skipped (an optional tool absent, so it asserted nothing);
 #   - the gate RAN but skipped part of itself -- e.g. m31/m32/m33 print "SKIP oracle
@@ -88,10 +98,18 @@ for g in "${GATES[@]}"; do
     cat "$ROOT/build/.gate.$g.out"
     skipped=$(grep -cEi "$skip_markers" "$ROOT/build/.gate.$g.out")
     passed=$(grep -cEi "$pass_markers" "$ROOT/build/.gate.$g.out")
-    if [ $rc -ne 0 ]; then
+    if [ $rc -eq 77 ]; then
+        RESULTS+=("SKIP $g  <- exit 77 (authoritative)"); n_skip=$((n_skip + 1))
+    elif [ $rc -ne 0 ]; then
         RESULTS+=("FAIL $g"); n_fail=$((n_fail + 1))
     elif [ "$skipped" -gt 0 ] && [ "$passed" -eq 0 ]; then
-        RESULTS+=("SKIP $g  <- asserted NOTHING"); n_skip=$((n_skip + 1))
+        # Exits 0 on a skip. Correct for the gate, wrong for the summary -- this is
+        # the shape that produced 'PASS m30_fixtures_valid_to_the_oracle' with no
+        # oracle present. Named individually so the remaining ones are visible and
+        # can be converted to exit 77.
+        RESULTS+=("SKIP $g  <- LEGACY: skips with exit 0, not 77")
+        n_skip=$((n_skip + 1)); n_legacy=$((n_legacy + 1))
+        legacy_list="$legacy_list $g"
     elif [ "$skipped" -gt 0 ]; then
         RESULTS+=("PARTIAL $g  <- ran, but $skipped sub-check(s) skipped")
         n_part=$((n_part + 1))
@@ -113,6 +131,10 @@ for r in "${RESULTS[@]}"; do echo "  $r"; done
 # Counted, never typed -- a hardcoded expectation is a claim that goes stale, which
 # is why the gate count is derived too.
 echo "ran $n_pass, partial $n_part, skipped $n_skip, failed $n_fail  (of ${#GATES[@]} gates)"
+if [[ "$n_legacy" -gt 0 ]]; then
+    echo "  of the $n_skip skipped, $n_legacy still signal it by WORDING rather than exit 77:"
+    for g in $legacy_list; do echo "    $g"; done
+fi
 
 fail=0
 [[ "$UNIT" == "PASS" ]] || fail=1

@@ -47,8 +47,8 @@ rc=0
 note() { printf '  %s\n' "$*"; }
 fail() { printf '  FAIL %s\n' "$*"; rc=1; }
 
-command -v unadf >/dev/null 2>&1 || { echo "SKIP: unadf not on PATH"; exit 0; }
-[ -x "$AFS" ] || { echo "SKIP: $AFS not built"; exit 0; }
+command -v unadf >/dev/null 2>&1 || { echo "SKIP: unadf not on PATH"; exit 77; }
+[ -x "$AFS" ] || { echo "SKIP: $AFS not built"; exit 77; }
 
 tmp=$(mktemp -d) || exit 2
 trap 'rm -rf "$tmp"' EXIT

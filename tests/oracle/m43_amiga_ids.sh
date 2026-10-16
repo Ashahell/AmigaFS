@@ -37,9 +37,9 @@ fails=0
 note() { printf '  %-48s %s\n' "$1" "$2"; }
 bad()  { printf '  %-48s FAIL (%s)\n' "$1" "$2"; fails=$((fails + 1)); }
 
-[ -x "$FUSE" ] && [ -x "$AFS" ] || { echo "M43 SKIP: build missing"; exit 0; }
-[ -f "$FIXTURE" ] || { echo "M43 SKIP: fixture not present"; exit 0; }
-command -v stat >/dev/null 2>&1 || { echo "M43 SKIP: stat(1) not available"; exit 0; }
+[ -x "$FUSE" ] && [ -x "$AFS" ] || { echo "M43 SKIP: build missing"; exit 77; }
+[ -f "$FIXTURE" ] || { echo "M43 SKIP: fixture not present"; exit 77; }
+command -v stat >/dev/null 2>&1 || { echo "M43 SKIP: stat(1) not available"; exit 77; }
 
 W=$(mktemp -d /tmp/amigafs-m43.XXXXXX)
 MPID=""

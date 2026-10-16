@@ -46,7 +46,7 @@ echo "M10 mount gate: RDB image through a real FUSE mount"
 
 if [ ! -f "$IMG" ]; then
     echo "M10 mount gate: SKIP (fixture absent)"
-    exit 0
+    exit 77
 fi
 
 "$BIN/amigafs-fuse" -f "$IMG" "$MNT" >/dev/null 2>&1 &

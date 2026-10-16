@@ -33,8 +33,8 @@ AFS="$ROOT/build/afs"
 FUSE="$ROOT/build/amigafs-fuse"
 FIXTURE="$ROOT/tests/fixtures/testffs.adf"
 
-[ -x "$AFS" ] || { echo "SKIP: afs not built"; exit 0; }
-[ -f "$FIXTURE" ] || { echo "SKIP: fixture absent (tests/fixtures are fetched, not committed)"; exit 0; }
+[ -x "$AFS" ] || { echo "SKIP: afs not built"; exit 77; }
+[ -f "$FIXTURE" ] || { echo "SKIP: fixture absent (tests/fixtures are fetched, not committed)"; exit 77; }
 
 have_oracle=no
 command -v adfls >/dev/null 2>&1 && have_oracle=yes

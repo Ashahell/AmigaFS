@@ -39,8 +39,8 @@ set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 AFS=$ROOT/build/afs
 ADFBIN=${ADFLIB_BIN:-}
-command -v adfformat >/dev/null 2>&1 || { echo "M37 SKIP: adfformat not on PATH"; exit 0; }
-command -v unadf    >/dev/null 2>&1 || { echo "M37 SKIP: unadf not on PATH"; exit 0; }
+command -v adfformat >/dev/null 2>&1 || { echo "M37 SKIP: adfformat not on PATH"; exit 77; }
+command -v unadf    >/dev/null 2>&1 || { echo "M37 SKIP: unadf not on PATH"; exit 77; }
 
 W=$(mktemp -d /tmp/amigafs-m37.XXXXXX)
 trap 'rm -rf "$W"' EXIT

@@ -21,7 +21,7 @@ echo "M10 gate: RDB partitions"
 
 if [ ! -f "$IMG" ]; then
     echo "M10 gate: SKIP (fixture $IMG absent)"
-    exit 0
+    exit 77
 fi
 
 out=$("$BIN/m10_partition" "$IMG" 2>&1)

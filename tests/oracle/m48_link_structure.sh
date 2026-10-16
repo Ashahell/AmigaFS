@@ -42,8 +42,8 @@ fails=0
 bad() { printf '  %-52s FAIL (%s)\n' "$1" "$2"; fails=$((fails + 1)); }
 note() { printf '  %-52s %s\n' "$1" "$2"; }
 
-command -v unadf >/dev/null 2>&1 || { echo "M48 gate: SKIP -- unadf not on PATH"; exit 0; }
-[ -x "$ROOT/build/afs" ] || { echo "M48 gate: SKIP -- build/afs not built"; exit 0; }
+command -v unadf >/dev/null 2>&1 || { echo "M48 gate: SKIP -- unadf not on PATH"; exit 77; }
+[ -x "$ROOT/build/afs" ] || { echo "M48 gate: SKIP -- build/afs not built"; exit 77; }
 [ -f "$FIX" ]            || { echo "M48 gate: FAIL -- fixture missing: $FIX"; exit 1; }
 
 echo "=== M48 gate (a hard link, verified on disk) ==="

@@ -47,10 +47,10 @@ trap cleanup EXIT
 echo "M13 gate: writes (put/mkdir), oracle-diffed both directions"
 
 for t in "$BIN/afs" "$BIN/amigafs-fuse"; do
-    [ -x "$t" ] || { echo "M13 gate: SKIP (build first)"; exit 0; }
+    [ -x "$t" ] || { echo "M13 gate: SKIP (build first)"; exit 77; }
 done
 for f in blank.adf testffs.adf testofs.adf a590_WD93028XA_6parts.hdd; do
-    [ -f "$ROOT/tests/fixtures/$f" ] || { echo "M13 gate: SKIP (fixtures absent)"; exit 0; }
+    [ -f "$ROOT/tests/fixtures/$f" ] || { echo "M13 gate: SKIP (fixtures absent)"; exit 77; }
 done
 
 # deterministic payloads (no randomness: byte-exact diffs must reproduce)

@@ -40,7 +40,7 @@ bad()  { printf '  %-52s FAIL\n' "$1"; fail=1; }
 WORK=$(mktemp -d /tmp/amigafs-m28.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
-[ -d "$ROOT/src/lib" ] || { echo "SKIP: not an amigafs tree"; exit 0; }
+[ -d "$ROOT/src/lib" ] || { echo "SKIP: not an amigafs tree"; exit 77; }
 
 cat > "$WORK/probe.c" <<'EOF'
 /* Build the fuzzer's volume, create one file, then mark that file's live
@@ -114,12 +114,12 @@ int main(void) {
 EOF
 
 if ! gcc -w -I"$ROOT/include" -o "$WORK/probe" "$WORK/probe.c" "$ROOT"/src/lib/*.c 2>/dev/null; then
-    echo "SKIP: could not build the probe"; exit 0
+    echo "SKIP: could not build the probe"; exit 77
 fi
 
 out=$("$WORK/probe" 2>/dev/null)
 case "$out" in
-    *FAIL*) echo "SKIP: probe could not set up ($out)"; exit 0 ;;
+    *FAIL*) echo "SKIP: probe could not set up ($out)"; exit 77 ;;
 esac
 
 everyday=$(printf '%s' "$out" | awk '{print $1}')

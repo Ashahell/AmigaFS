@@ -34,15 +34,15 @@ echo "M11 gate: entry comments vs amitools"
 
 if ! python3 -c "import amitools" >/dev/null 2>&1; then
     echo "M11 gate: SKIP (amitools not importable by this python)"
-    exit 0
+    exit 77
 fi
 if [ ! -x "$BIN/m11_comment" ]; then
     echo "M11 gate: SKIP (build m11_comment first)"
-    exit 0
+    exit 77
 fi
 
 images=$(ls "$FIX"/*.adf 2>/dev/null)
-[ -n "$images" ] || { echo "M11 gate: SKIP (no fixtures)"; exit 0; }
+[ -n "$images" ] || { echo "M11 gate: SKIP (no fixtures)"; exit 77; }
 
 # ---- 0. restrict the oracle to volumes we can actually open ---------------
 # We refuse DOS\6/DOS\7 by name (decision C1) and amitools happily reads them,

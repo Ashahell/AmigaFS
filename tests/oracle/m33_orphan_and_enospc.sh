@@ -40,8 +40,8 @@ trap 'rm -rf "$WORK"' EXIT
 AFS="$ROOT/build/afs"
 FIXTURE="$ROOT/tests/fixtures/testffs.adf"
 
-[ -x "$AFS" ] || { echo "SKIP: afs not built"; exit 0; }
-[ -f "$FIXTURE" ] || { echo "SKIP: fixture absent (tests/fixtures are fetched, not committed)"; exit 0; }
+[ -x "$AFS" ] || { echo "SKIP: afs not built"; exit 77; }
+[ -f "$FIXTURE" ] || { echo "SKIP: fixture absent (tests/fixtures are fetched, not committed)"; exit 77; }
 
 pass() { echo "  PASS $1"; }
 fail() { echo "  FAIL $1"; FAILED=$((FAILED+1)); }

@@ -43,9 +43,9 @@ bad()  { printf '  %-52s FAIL\n' "${1:-}"; fail=1; }
 WORK=$(mktemp -d /tmp/amigafs-m30.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
-command -v adfls >/dev/null 2>&1 || { echo "SKIP: adfls not on PATH"; exit 0; }
-[ -d "$ROOT/src/lib" ]   || { echo "SKIP: not an amigafs tree"; exit 0; }
-[ -x "$ROOT/build/afs" ] || { echo "SKIP: afs not built"; exit 0; }
+command -v adfls >/dev/null 2>&1 || { echo "SKIP: adfls not on PATH"; exit 77; }
+[ -d "$ROOT/src/lib" ]   || { echo "SKIP: not an amigafs tree"; exit 77; }
+[ -x "$ROOT/build/afs" ] || { echo "SKIP: afs not built"; exit 77; }
 
 # Builds every synthetic fixture shape we have. Each `emit <name>` writes
 # "$WORK/<name>.adf" and prints "<name> <blocks> <expected-dos-type>".
@@ -184,11 +184,11 @@ EOF
 
 if ! gcc -w -I"$ROOT/include" -o "$WORK/fixtures" "$WORK/fixtures.c" "$ROOT"/src/lib/*.c 2>"$WORK/cc.log"; then
     echo "SKIP: could not build the fixture generators: $(tail -1 "$WORK/cc.log")"
-    exit 0
+    exit 77
 fi
 manifest=$("$WORK/fixtures" "$WORK" 2>&1)
 case "$manifest" in
-    *FAIL*) echo "SKIP: could not build the fixtures: $manifest"; exit 0 ;;
+    *FAIL*) echo "SKIP: could not build the fixtures: $manifest"; exit 77 ;;
 esac
 note "built $(printf '%s\n' "$manifest" | wc -l) synthetic fixture shapes" "ok"
 

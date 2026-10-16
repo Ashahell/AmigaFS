@@ -55,16 +55,16 @@ echo "M12 gate: CLI on RDB-partitioned images"
 
 if [ ! -f "$IMG" ]; then
     echo "M12 gate: SKIP (fixture $IMG absent)"
-    exit 0
+    exit 77
 fi
 if [ ! -x "$BIN/afs" ]; then
     echo "M12 gate: SKIP (build afs first)"
-    exit 0
+    exit 77
 fi
 for tool in adfls unadf rdbtool xdftool; do
     if ! command -v "$tool" >/dev/null; then
         echo "M12 gate: SKIP (oracle '$tool' not on PATH; set ADFLIB_BIN for ADFlib)"
-        exit 0
+        exit 77
     fi
 done
 

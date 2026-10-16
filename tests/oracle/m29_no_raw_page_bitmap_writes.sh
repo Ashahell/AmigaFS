@@ -47,7 +47,7 @@ bad()  { printf '  %-52s FAIL\n' "${1:-}"; fail=1; }
 WORK=$(mktemp -d /tmp/amigafs-m29.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
-[ -d "$ROOT/src/lib" ] || { echo "SKIP: not an amigafs tree"; exit 0; }
+[ -d "$ROOT/src/lib" ] || { echo "SKIP: not an amigafs tree"; exit 77; }
 
 # Static check: no fixture may apply the assembled-map setter to a name that is
 # assigned from a raw page. The pattern to catch is a single STATEMENT:

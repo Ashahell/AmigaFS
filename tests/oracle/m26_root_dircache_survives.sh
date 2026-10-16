@@ -43,7 +43,7 @@ bad()  { printf '  %-52s FAIL\n' "$1"; fail=1; }
 WORK=$(mktemp -d /tmp/amigafs-m26.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
-[ -x "$BIN/afs" ] || { echo "SKIP: afs not built"; exit 0; }
+[ -x "$BIN/afs" ] || { echo "SKIP: afs not built"; exit 77; }
 [ -f "$FIX" ]    || { echo "FAIL: fixture missing (run fetch_fixtures.sh)"; exit 1; }
 
 before=$(sha256sum "$FIX" | cut -d' ' -f1)
@@ -57,7 +57,7 @@ type=$("$BIN/afs" info "$WORK/t.adf" 2>/dev/null | grep -i "dos type" | head -1)
 note "volume type" "$type"
 case "$type" in
     *DOS\\5*|*DIRC*) ;;
-    *) echo "SKIP: ${type:-unknown} has no dir cache"; exit 0 ;;
+    *) echo "SKIP: ${type:-unknown} has no dir cache"; exit 77 ;;
 esac
 
 # The root's first dir-cache block, read from the rootblock's own bs-8 field.
@@ -94,11 +94,11 @@ int main(int argc, char **argv) {
 }
 EOF
 gcc -w -I"$ROOT/include" -o "$WORK/dcr" "$WORK/dcr.c" "$ROOT"/src/lib/*.c 2>/dev/null \
-    || { echo "SKIP: could not build the chain probe"; exit 0; }
+    || { echo "SKIP: could not build the chain probe"; exit 77; }
 
 chain_before=$("$WORK/dcr" "$WORK/t.adf")
 case "$chain_before" in
-    NOCHAIN|"") echo "SKIP: the root has no dir-cache chain on this fixture"; exit 0 ;;
+    NOCHAIN|"") echo "SKIP: the root has no dir-cache chain on this fixture"; exit 77 ;;
 esac
 root_cache=$(printf '%s\n' "$chain_before" | head -1 | cut -d: -f1)
 note "root's first dir-cache block" "$root_cache"

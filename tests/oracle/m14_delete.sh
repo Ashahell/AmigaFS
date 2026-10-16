@@ -41,10 +41,10 @@ trap cleanup EXIT
 echo "M14 gate: delete + rename"
 
 for t in "$BIN/afs" "$BIN/amigafs-fuse"; do
-    [ -x "$t" ] || { echo "M14 gate: SKIP (build first)"; exit 0; }
+    [ -x "$t" ] || { echo "M14 gate: SKIP (build first)"; exit 77; }
 done
 for f in blank.adf testffs.adf; do
-    [ -f "$ROOT/tests/fixtures/$f" ] || { echo "M14 gate: SKIP (fixtures absent)"; exit 0; }
+    [ -f "$ROOT/tests/fixtures/$f" ] || { echo "M14 gate: SKIP (fixtures absent)"; exit 77; }
 done
 
 python3 -c "open('$WORK/big.bin','wb').write(bytes((i*7+1)&0xFF for i in range(100*1024)))"
