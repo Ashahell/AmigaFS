@@ -1743,7 +1743,16 @@ does not exist here.
 both 16-bit, which is the conservative reading under either hypothesis: if the
 field really is `ushort`, it is exact; if it is really `ulong`, we return its low
 half and lose the high half rather than reading past it into whatever follows.
-`-o amiga_ids` stays **unoffered**, which is where it already was.
+> **CORRECTED by M43: `-o amiga_ids` IS offered.** This section, and the open
+> risk below it, both said the option was "not offered". It is registered at
+> `src/fuse/main.c:1271`, in the option help, plumbed through `afs_translate_ids`
+> into `fill_stat`, and documented in the README as off by default. The claim was
+> inherited from a stale plan line and repeated here without reading the option
+> table. It matters beyond bookkeeping: **the width question is live in a
+> shipped, user-facing option.** `m43_amiga_ids.sh` exercises it end to end.
+>
+> The two read sites are `src/lib/dir.c:1009` (dirents) and `src/lib/file.c:175`
+> (file headers).
 
 The honest status is therefore not "unsettled" but **"unsettleable here, and the
 conservative exposure is in place."** Anyone who wants it settled needs the
@@ -2239,7 +2248,8 @@ Owner decisions, recorded. These are settled, not open.
   `GID == 0`, and four zero bytes and two zero bytes are the same sixteen
   bytes. What IS settled is the decision -- the reader keeps `be16` for both
   (`src/lib/dir.c:1009-1010`), the conservative reading under either
-  hypothesis, and `-o amiga_ids` stays unoffered. Settling the fact needs the
+  hypothesis. `-o amiga_ids` is **LIVE** -- corrected by M43, it IS offered;
+  see that section. Settling the fact needs the
   MultiUser filesystem handler itself, or a genuine MultiUser-formatted
   image. Do not re-attempt the cross-check: it is empty by construction.
 
