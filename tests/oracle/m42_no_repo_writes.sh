@@ -20,9 +20,9 @@
 #
 # It runs a sample of the artifact-producing gates and asserts the working tree is
 # byte-identical afterwards. A SAMPLE, deliberately: run_all_gates.sh invokes
-# this gate, so running all of them here would recurse. The sample is every gate
-# that shells out to `unadf`, plus m37, which constructs images and reads them
-# back through the oracle.
+# this gate, so running all of them here would recurse. The sample is COMPUTED
+# from the tree -- every gate mentioning unadf, clang, fsanitize=fuzzer,
+# amigafs-fuse or git -- because a hand-list inside a gate goes stale silently.
 #
 # The precondition matters as much as the check: if the tree is already dirty when
 # this starts, the check cannot attribute a change to a gate, and reporting
@@ -30,6 +30,10 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
+W=$(mktemp -d /tmp/amigafs-m42.XXXXXX)
+trap 'rm -rf "$W"' EXIT
+incomplete=0
+incomplete_list=""
 cd "$ROOT" || exit 2
 
 # The sample is COMPUTED from the tree, never hand-listed.
@@ -91,16 +95,55 @@ for g in "${SAMPLE[@]}"; do
     # absolute or repo-relative path would still have been caught, but the common
     # case (extract into cwd) could never trip it.
     #
-    # Exit status is deliberately ignored. What is under test is the side effect
-    # on the repository, not whether the gate passes -- several of these exit
-    # non-zero when run out of band, and run_all_gates.sh is the thing that
-    # reports their verdicts.
-    ( cd "$ROOT" && timeout 900 bash "$script" ) >/dev/null 2>&1 || true
+    # The gate's VERDICT is not what is under test -- what is under test is its side
+    # effect on the repository -- so a sampled gate that fails its own assertions
+    # must not be reported here as if it had dirtied the tree. Those are two
+    # different verdicts and they are kept apart below.
+    #
+    # But the exit status is NOT discarded, because "no debris" from a gate that
+    # never ran is not evidence of anything. This gate used to pipe every gate's
+    # output to /dev/null and append || true, on the stated grounds that "several
+    # of these exit non-zero when run out of band". Measured: on a clean tree
+    # 0 of 21 exit non-zero. The comment asserted a fact about the suite that was
+    # never true, and it happened to be load-bearing -- it licensed throwing away
+    # the only evidence that a gate had actually run.
+    #
+    # That gap was demonstrated in this session's own mutant: the fuzz target
+    # failed to link, so no crash was found, so the run produced no debris, and
+    # this gate reported "repository byte-identical after 21 gate(s)" for a gate
+    # that had never executed a single input.
+    ( cd "$ROOT" && timeout 900 bash "$script" ) >"$W/$g.out" 2>&1
+    rc=$?
     ran=$((ran + 1))
+    if [ $rc -ne 0 ];   then
+        incomplete=$((incomplete + 1))
+        incomplete_list="$incomplete_list $g(rc=$rc)"
+    fi
 done
 
 after=$(digest)
 echo "  ran $ran gate(s), skipped $skipped"
+
+# Checked BEFORE the digest verdict, and deliberately as a separate failure. A
+# gate that aborted early produced no debris -- so on the digest alone this gate
+# would pass, and "no gate writes into the repository" would be a claim about
+# gates that never ran. Ordering it first also means a suite with a real
+# regression reads as one failure here rather than two that look independent.
+if [ "$incomplete" -gt 0 ]; then
+    echo "  FAIL  $incomplete of $ran sampled gate(s) did not complete:"
+    for g in $incomplete_list; do
+        echo "        $g"
+        tail -4 "$W/${g%%(*}.out" 2>/dev/null | sed 's/^/            /'
+    done
+    echo
+    echo "  This is NOT a statement that a gate dirtied the tree. It is that a gate"
+    echo "  did not finish, so its side effects were never exercised and their"
+    echo "  absence proves nothing. Look above: usually the real cause, which"
+    echo "  run_all_gates.sh reports in full."
+    echo
+    echo "M42 gate: FAIL ($incomplete sampled gate(s) incomplete)"
+    exit 1
+fi
 
 if [ "$before" != "$after" ]; then
     echo "  FAIL  a gate modified the repository"
