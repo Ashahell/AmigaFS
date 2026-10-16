@@ -478,8 +478,70 @@ static void test_rebuild_ignores_bs8_when_the_volume_has_no_dircache(void) {
     afs_volume_close(v);
 }
 
+/* A volume may list MORE bitmap pages than its block count needs. g1a30c.adf
+ * does: it lists two where one is derivable, and its second entry is a block
+ * the tree already uses, so consulting it as map data would read a live block
+ * as bitmap bits.
+ *
+ * ADFlib derives the count outright (adf_bitm.c:1007 nBlock2bitmapSize, with
+ * ADF_BM_MAP_SIZE = 127 from adf_blk.h:114), uses only that many entries, and
+ * never compares the stored list against the derived one. It also explicitly
+ * declines to "repair" entries beyond the derived size -- the comment at
+ * adf_bitm.c:1024 gives the reason: software may keep its own data there, e.g.
+ * copy protection, so repairing it would damage the software. The faithful
+ * behaviour is therefore to use the derived count and IGNORE the surplus.
+ *
+ * Load-bearing three times over, and every one is an assertion here:
+ *
+ *   - the rebuild must SUCCEED. It used to refuse, naming a remedy ("repair the
+ *     page list") that no command could perform -- and since a stale map is
+ *     exactly what refuses writes, that left the volume permanently
+ *     unwritable.
+ *   - the surplus must NOT be treated as a page. With NBLK = 16 every map bit
+ *     fits inside page 0, so a second page cannot affect bit ADDRESSING at all;
+ *     its only possible effect is the pre-pass marking that block used. A
+ *     mutant that follows the surplus is caught by exactly one assertion --
+ *     block 10 being marked used -- and nothing else would catch it.
+ *   - the page list must NOT be rewritten, because ADFlib does not repair
+ *     extras. Writing it back would be the divergence, not the fix. */
+static void test_rebuild_ignores_a_surplus_bitmap_page(void) {
+    uint8_t img[NBLK * BS];
+    build_vol(img);
+    uint8_t *r = img + 8 * BS;
+    put_be32(r + BS - 192, 10);            /* bm_pages[1] = block 10 */
+    put_be32(r + 20, afs_block_checksum(r, BS, 20));   /* restamp after editing */
+
+    afs_volume_t *v = NULL;
+    char err[256] = {0};
+    CHECK(afs_volume_open_memory(img, sizeof img, BS, &v, err, sizeof err) == 0,
+          "a volume carrying a surplus bitmap page opens (%s)", err);
+    if (!v) return;
+
+    CHECK(afs_bitmap_rebuild(v, NULL, err, sizeof err) == 0,
+          "rebuild succeeds despite the surplus page (%s)", err);
+
+    uint32_t n = afs_volume_block_count(v);
+    size_t mapbytes = ((size_t)n + 31u) / 32u * 4u;
+    uint8_t *map = calloc(1, mapbytes);
+    if (map && afs_bitmap_read(v, map, mapbytes) >= 0) {
+        CHECK(!bm_get(map, 8), "  ...the rootblock is still marked used");
+        CHECK(!bm_get(map, 9), "  ...the real bitmap page is still marked used");
+        CHECK(bm_get(map, 10),
+              "  ...the surplus entry is NOT honoured as a page (10 left free)");
+    } else {
+        CHECK(0, "map readable after the rebuild");
+    }
+    free(map);
+
+    CHECK(be32(r + BS - 192) == 10,
+          "the rootblock's page list is NOT rewritten (ADFlib does not repair)");
+    CHECK(afs_block_valid(r, BS, 20), "and the rootblock checksum is still valid");
+    afs_volume_close(v);
+}
+
 int main(void) {
     test_rebuild_ignores_bs8_when_the_volume_has_no_dircache();
+    test_rebuild_ignores_a_surplus_bitmap_page();
     test_rebuild_keeps_the_rootblocks_dircache();
     test_rebuild_keeps_a_subdirs_dircache();
     test_rebuild_never_frees_the_structural_blocks();
