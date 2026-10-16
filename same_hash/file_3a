@@ -1,0 +1,128 @@
+LL0:
+	.seg	"data"
+	.seg	"text"
+	.proc 04
+	.global	_main
+_main:
+	!#PROLOGUE# 0
+	sethi	%hi(LF12),%g1
+	add	%g1,%lo(LF12),%g1
+	save	%sp,%g1,%sp
+	!#PROLOGUE# 1
+	st	%i0,[%fp+0x44]
+	st	%i1,[%fp+0x48]
+	mov	0x1,%o0
+	st	%o0,[%fp+-0x14]
+	mov	0x2,%o1
+	st	%o1,[%fp+-0x10]
+	mov	0x4,%o2
+	st	%o2,[%fp+-0xc]
+	mov	0x2,%o3
+	st	%o3,[%fp+-0x44]
+	mov	0x3,%o4
+	st	%o4,[%fp+-0x40]
+	mov	0x4,%o5
+	st	%o5,[%fp+-0x3c]
+	mov	0x3,%o7
+	st	%o7,[%fp+-0x38]
+	mov	0x3,%l0
+	st	%l0,[%fp+-0x34]
+	mov	0x4,%l1
+	st	%l1,[%fp+-0x30]
+	mov	0x2,%l2
+	st	%l2,[%fp+-0x2c]
+	mov	0x4,%l3
+	st	%l3,[%fp+-0x28]
+	mov	0x4,%l4
+	st	%l4,[%fp+-0x24]
+	mov	0x2,%l5
+	st	%l5,[%fp+-0x20]
+	mov	0x3,%l6
+	st	%l6,[%fp+-0x1c]
+	mov	0x5,%l7
+	st	%l7,[%fp+-0x18]
+	st	%g0,[%fp+-0x4]
+L16:
+	ld	[%fp+-0x4],%i0
+	cmp	%i0,0x4
+	bge	L15
+	nop
+	sub	%fp,0x54,%o0
+	ld	[%fp+-0x4],%o1
+	sll	%o1,0x2,%o2
+	st	%g0,[%o0+%o2]
+	st	%g0,[%fp+-0x8]
+L19:
+	ld	[%fp+-0x8],%o3
+	cmp	%o3,0x3
+	bge	L18
+	nop
+	ld	[%fp+-0x4],%o4
+	sll	%o4,2,%o4
+	mov	%o4,%o5
+	sll	%o5,1,%o5
+	add	%o4,%o5,%o4
+	sub	%fp,0x44,%o7
+	add	%o7,%o4,%l0
+	ld	[%fp+-0x8],%l1
+	sll	%l1,0x2,%l2
+	ld	[%l0+%l2],%o1
+	sub	%fp,0x14,%l3
+	ld	[%fp+-0x8],%l4
+	sll	%l4,0x2,%l5
+	ld	[%l3+%l5],%o0
+	call	.mul,2
+	nop
+	mov	%o0,%i5
+	sub	%fp,0x54,%l6
+	ld	[%fp+-0x4],%l7
+	sll	%l7,0x2,%i0
+	ld	[%l6+%i0],%i1
+	add	%i1,%i5,%i1
+	st	%i1,[%l6+%i0]
+L17:
+	ld	[%fp+-0x8],%i2
+	add	%i2,0x1,%i2
+	st	%i2,[%fp+-0x8]
+	b	L19
+	nop
+L18:
+L14:
+	ld	[%fp+-0x4],%i3
+	add	%i3,0x1,%i3
+	st	%i3,[%fp+-0x4]
+	b	L16
+	nop
+L15:
+	st	%g0,[%fp+-0x4]
+L22:
+	ld	[%fp+-0x4],%i4
+	cmp	%i4,0x4
+	bge	L21
+	nop
+	.seg	"data1"
+L24:
+	.ascii	"%2d\012\0"
+	.seg	"text"
+	sub	%fp,0x54,%i5
+	ld	[%fp+-0x4],%o0
+	sll	%o0,0x2,%o1
+	ld	[%i5+%o1],%o1
+	set	L24,%o0
+	call	_printf,2
+	nop
+L20:
+	ld	[%fp+-0x4],%o2
+	add	%o2,0x1,%o2
+	st	%o2,[%fp+-0x4]
+	b	L22
+	nop
+L21:
+LE12:
+	ret
+	restore
+       LF12 = -184
+	LP12 = 96
+	LST12 = 96
+	LT12 = 96
+	.seg	"data"

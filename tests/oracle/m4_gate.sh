@@ -25,9 +25,6 @@ export PATH="$ADFLIB_BIN:$PATH"
 
 fails=0; total=0; matched=0; extra_total=0
 
-# M42 MUTANT: reproduce the unadf-writes-to-cwd failure
-unadf "$FIX/testffs.adf" >/dev/null 2>&1 || true
-
 echo "=== M4 gate (file contents vs unadf) ==="
 [[ -x "$OURS" ]] || { echo "  (build m4_cat first)"; exit 2; }
 command -v unadf >/dev/null || { echo "  (unadf not found in $ADFLIB_BIN)"; exit 2; }
