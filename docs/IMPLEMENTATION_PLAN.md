@@ -1526,6 +1526,77 @@ somewhere the M34 guard would not have needed to be.
 and `CMakeLists.txt` must name the same gates, and that pairing is verified
 together rather than in one place. Wiring it, scoped to geometry only, is the
 follow-up.
+### Part 9's "new finding" was wrong: the rebuild never ran
+
+Part 9 reported that "`bitmap-rebuild` leaves live blocks marked free on
+`g1a30c`". It does not. **The rebuild refused**, and I never saw it, because I
+ran it with output to `/dev/null` and assumed it had worked — the same mistake
+`dd`'s `bs=512` was, in a different costume.
+
+Running it with its output visible:
+
+```
+arccsh          rc=0   1760 blocks, 1322 used, 438 free, 20 reclaimed
+blank           rc=0   1760 blocks,    7 used, 1753 free,  5 reclaimed
+cache_crash     rc=1   DOS\6 is not a supported AmigaDOS volume
+ffdisk0049      rc=0   1760 blocks, 1718 used,  42 free, 26 reclaimed
+g1a30c          rc=1   volume lists 2 bitmap pages but needs 1;
+                         rebuild needs the page list repaired first
+links           rc=0   ... 12 used, 1748 free, 10 reclaimed
+testffs         rc=0   ... 343 used, 1417 free, 23 reclaimed
+testhd          rc=0   3520 blocks, 306 used, 3214 free, 16 reclaimed
+test_link_chains rc=0  ...  31 used, 1729 free, 29 reclaimed
+testofs         rc=0   ... 366 used, 1394 free, 18 reclaimed
+win32-names     rc=0   ...  86 used, 1674 free, 20 reclaimed
+```
+
+So `g1a30c`'s ten "marked FREE" disagreements were simply the **un-rebuilt
+stale map** — the same condition every fixture has — and the geometry checker
+was reading a map that had never been touched. `rb_mark_file` is exonerated:
+the walk never reached it because the rebuild aborted before writing anything.
+
+Confirmed directly: calling `afs_bitmap_rebuild` and reading the map back
+through the same handle shows 972, 967 and 1086 still free while 880 and 881
+stay used — the map is untouched, and the refusal leaves no partial state. That
+is the correct behaviour: **refuse with a name, write nothing.**
+
+### The real finding: the refusal names a remedy that does not exist
+
+> `volume lists 2 bitmap pages but needs 1; rebuild needs the page list repaired
+> first`
+
+**There is no command that repairs the page list.** The whole tool surface for
+this is `afs bitmap` (report) and `afs bitmap-rebuild` (rebuild). So a user
+holding such a volume is **stuck in a loop**: the rebuild needs the page list
+repaired, nothing repairs the page list, and therefore the map can never be
+rebuilt — and since the stale map is exactly what refuses writes, **the volume
+cannot be written at all.** One bad field in the rootblock, and the documented
+remedy for every other stale-map volume is unreachable.
+
+This is the same class as M34, and the opposite mistake. M34's guard refused and
+named `afs bitmap-rebuild` as the remedy — which exists. This refuses and names
+a repair that **does not**. A refusal that names a missing remedy is worse than
+no refusal, because it tells the user to go and do a thing they cannot do.
+
+**The fix is small and in the spirit of the tool.** The rebuild's whole purpose
+is to repair the map from the tree, and the number of bitmap pages a volume
+needs is *derivable* — 1760 blocks needs one 512-byte page. So the page count
+should be **derived and rewritten**, not demanded of the volume and trusted:
+
+1. Derive the required page count from the block count and block size.
+2. If the rootblock's list disagrees, rewrite the list as part of the rebuild —
+   which is the same all-or-nothing, nothing-written-until-the-walk-completes
+   discipline the rebuild already has.
+3. Drop the refusal, or narrow it to the case where the list is *longer* than
+   derived (where the surplus pages may hold live data and freeing them is a
+   decision, not a repair).
+
+**Next: prove step 2 is safe before writing it.** `g1a30c` is the only fixture
+that refuses, so it is the only test data for this, and its 998 orphans mean a
+wrong derivation frees a lot. The check that must pass before and after: the
+geometry checker clean, `afs verify --orphans` unchanged, and the ADFlib oracle
+still reads the same tree. If the derived page count disagrees with the list on
+a volume where the list is *right*, that is the case that must refuse.
 ### Rules M34
 
 - **M34.1 — A self-consistent map is not an accurate map.** The two guards

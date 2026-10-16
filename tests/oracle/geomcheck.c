@@ -48,7 +48,7 @@ static int is_free(struct chk *c, uint32_t b)
 
 static void walk(struct chk *c, uint32_t dirblock, const char *prefix, int depth);
 
-static void check_file(struct chk *c, uint32_t hdr, const char *path)
+static void check_file(struct chk *c, uint32_t hdr, const char *path, const char *kindname)
 {
     unsigned char *h = malloc(c->bs);
     uint32_t size, want_n, i, prev = 0, first;
@@ -128,7 +128,8 @@ static void check_file(struct chk *c, uint32_t hdr, const char *path)
         }
     }
     c->files++;
-    if (c->verbose) printf("  ok   %s (%u bytes, %u blocks)\n", path, size, want_n);
+    if (c->verbose) printf("  ok   %s [%s] (%u bytes, %u blocks)\n",
+                           path, kindname, size, want_n);
     free(h);
 }
 
@@ -153,7 +154,8 @@ static void walk(struct chk *c, uint32_t dirblock, const char *prefix, int depth
             c->dirs++;
             walk(c, ents[i].block, sub, depth + 1);
         } else if (ents[i].kind == AFS_BLOCK_FILE || ents[i].kind == AFS_BLOCK_LINKFILE) {
-            check_file(c, ents[i].block, sub);
+            check_file(c, ents[i].block, sub,
+                       ents[i].kind == AFS_BLOCK_LINKFILE ? "hardlink" : "file");
         }
     }
     free(ents);
