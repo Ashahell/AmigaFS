@@ -1756,6 +1756,53 @@ itself about and no oracle can check.
 
 **And the plan's instruction is corrected in place**, because leaving a
 prescribed method that cannot work is how the next session spends a day on it.
+### M40 — the "ADFlib RDB support is experimental" claim is wrong for this purpose (2026-10-16)
+
+The last open risk. The M7 gate used **amitools `rdbtool` alone**, because
+"ADFlib's RDB support is experimental". Tested rather than inherited, and that
+claim does not hold for this use: **`adfinfo` prints a full partition table**
+(idx, first bl., last bl., filesystem, name) that agrees with `rdbtool` on every
+field of every partition of the A590 image.
+
+The derivation, because it looked like a conflict first and was not:
+
+    amitools  Partition: #0 'OFS'  2  115   6156  3.0Mi  DOS0
+                                            ^part_blks, NOT a last block
+
+`fs/rdb/Partition.py:99` formats `num, name, low_cyl, high_cyl, part_blks`, so
+the two numbers are **cylinders**. With `cyl_blks = 54`, 'OFS' `low_cyl=2`
+`high_cyl=115` gives blocks `2*54 = 108 .. 115*54+53 = 6263` — exactly what
+`adfinfo` prints. The apparent conflict was reading amitools' *third* number
+(6156) as a last-block and comparing it to ADFlib's 6263.
+
+All three sources agree on the real image:
+
+| partition | ours (start, size) | ADFlib (first, last) | size = last-first+1 |
+|---|---|---|---|
+| OFS | 108, 6156 | 108, 6263 | 6156 |
+| OFS INTL | 6264, 6156 | 6264, 12419 | 6156 |
+| OFS DirCache | 12420, 6156 | 12420, 18575 | 6156 |
+| FFS | 18576, 6156 | 18576, 24731 | 6156 |
+| FFS INTL | 24732, 6156 | 24732, 30887 | 6156 |
+| FFS DirCache | 30888, 11340 | 30888, 42227 | 11340 |
+
+So the oracle is **no longer single-sourced**, and a genuine disagreement between
+the two is now visible rather than undetectable. That is the actual value of the
+change: not that a second opinion agrees today, but that a day it does not, the
+gate says so.
+
+**Load-bearing, proven by doctoring the second oracle** — ADFlib with partition
+2's start shifted by one:
+
+    FAIL  partition "OFS DirCache" start: ours 12420, ADFlib 12421
+    M7 gate: 1 failure(s)          exit=1
+
+And a process note, because the first attempt at that mutant proved **nothing**:
+the `sed` was off by one space, never matched, and I read the resulting clean run
+as a survivor — rule 276, an impossible measurement rather than a measurement. The
+doctor was verified to have actually altered the output before the gate's verdict
+was read, which is the step the first version skipped.
+
 ### M39 — a libFuzzer target over blockio (2026-10-16)
 
 Closes the "hostile images" open risk. `blockio` is the one place the core

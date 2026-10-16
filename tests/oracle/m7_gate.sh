@@ -16,6 +16,9 @@ FIX="$ROOT/tests/fixtures"
 PROG="$ROOT/build/m7_rdb"
 IMG="$FIX/a590_WD93028XA_6parts.hdd"
 
+ADFTBL=$(mktemp /tmp/amigafs-m7adfinfo.XXXXXX)
+trap 'rm -f "$ADFTBL"' EXIT
+
 fails=0
 ok()  { echo "  PASS  $*"; }
 bad() { echo "  FAIL  $*" >&2; fails=$((fails+1)); }
@@ -78,6 +81,52 @@ if [[ "$mism" == "0" ]]; then
 else
     bad "$mism partition start(s) do not hold their declared DOS type"
     grep -v MISMATCHES <<< "$check" >&2
+fi
+
+# ---- two oracles, cross-checked -------------------------------------------
+#
+# This gate used amitools rdbtool alone, because "ADFlib's RDB support is
+# experimental". That claim was tested rather than inherited, and it is wrong for
+# this purpose: `adfinfo` prints a full partition table (idx, first bl., last bl.,
+# filesystem, name) that agrees with rdbtool on every field of every partition.
+# Deriving it: amitools reports CYLINDERS, not blocks --
+# `fs/rdb/Partition.py:99` formats `num, name, low_cyl, high_cyl, part_blks` --
+# and with cyl_blks = 54, 'OFS' low_cyl=2 high_cyl=115 gives blocks
+# 2*54 = 108 .. 115*54+53 = 6263, which is exactly what adfinfo prints.
+#
+# So the oracle is no longer single-sourced, and a disagreement between the two
+# would now be visible instead of undetectable. Note the trap that made this
+# look like a conflict at first: amitools' THIRD number (6156) is `part_blks`,
+# not a last-block, and reading it as one puts it in apparent conflict with
+# adfinfo's 6263.
+if ! command -v adfinfo >/dev/null 2>&1; then
+    echo "  SKIP  adfinfo not on PATH; the second oracle is unavailable"
+else
+    adfinfo "$IMG" 2>/dev/null | awk '/idx  first bl\./ {grab=1; next}
+        grab && /^ *[0-9]+ / {print $2, $3, $5, $6}' > "$ADFTBL"
+    n_adf=$(wc -l < "$ADFTBL" | tr -d ' ')
+    if [[ "$n_adf" == "6" ]]; then
+        ok "ADFlib's adfinfo also finds six partitions"
+    else
+        bad "ADFlib found $n_adf partitions, expected 6"
+    fi
+    i=0
+    while IFS=$'\t' read -r name typ start size sup; do
+        read -r afirst alast aname < <(sed -n "$((i+1))p" "$ADFTBL")
+        [[ -n "${afirst:-}" ]] || { bad "no ADFlib row for \"$name\""; i=$((i+1)); continue; }
+        afirst=${afirst#\"}; alast=${alast%\"}; aname=${aname#\"}; aname=${aname%\"}
+        if [[ "$name" != "$aname" ]]; then
+            bad "partition $i name: ours \"$name\", ADFlib \"$aname\""
+        elif [[ "$start" != "$afirst" ]]; then
+            bad "partition \"$name\" start: ours $start, ADFlib $afirst"
+        elif [[ "$size" != "$((alast - afirst + 1))" ]]; then
+            bad "partition \"$name\" size: ours $size, ADFlib $((alast - afirst + 1))"
+        else
+            ok "\"$name\" start+size matches ADFlib exactly"
+        fi
+        i=$((i+1))
+    done < <("$PROG" "$IMG")
+    rm -f "$ADFTBL"
 fi
 
 echo
