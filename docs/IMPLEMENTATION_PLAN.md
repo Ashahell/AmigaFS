@@ -1111,12 +1111,37 @@ failure is specific to writing **through a live FUSE mount** -- `create` plus
 `setattr`/`extend` plus `write` -- which is a different path with its own block
 allocation and its own truncation/extension handling.
 
-That is as far as the reproduction got: the mount case could not be driven
-deterministically from the shell, because the fuzzer's own seeded byte flips are
-what produce it and a hand-made one-byte flip does not. **So the next step is a
-seeded single-iteration reproduction using `mount_fuzz.sh`'s own `rnd()`
-sequence at the iterations that failed (7 strict, 7 and 18 lenient), rather than
-a hand-built approximation of it.**
+### The reason it could not be reproduced: the gate was not deterministic
+
+There was no seeded sequence to replay, because **the gate had no seed.** The
+damage in the write lane was
+
+```sh
+off=$(( (RANDOM * 32768 + RANDOM) % (size / 512) * 512 ))
+```
+
+and bash seeds `$RANDOM` from the pid and the clock. So the byte pattern
+differed on **every run**: a failure could not be replayed, and "iter 7" in one
+run said nothing about any other. It looked flaky -- the wrong-bytes write
+appeared in some runs and not others -- and **a flaky defect that cannot be
+seeded is not a defect anyone can fix.**
+
+`mount_fuzz.sh` now seeds `$RANDOM` once per lane from a single overridable
+base, so the same seed replays the same damage exactly:
+
+```sh
+MOUNT_FUZZ_SEED=12345 bash tests/oracle/mount_fuzz.sh
+```
+
+Measured: two runs at the default seed produce byte-identical tallies
+(`iterations=40 mounted=36 refused=4 entries=1097 files=843
+bytes=9796749` / `25 mounted, 3 refused, 3838 ops, 3762 accepted`), and the
+gate passes at seeds `20261016` (twice) and `7`.
+
+**So the wrong-bytes write was a real damage pattern that the gate could
+neither keep nor reproduce** -- it is now both. This is the standing rule from
+M23 applied to a gate rather than a test: *never dismiss a flake without
+reproducing it*, and the first half of that is making reproduction possible.
 
 ### Rules M34
 

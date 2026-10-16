@@ -48,6 +48,11 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Mount fuzz gate: FUSE shell under hostile images, real mount"
+# M36: one seed for the whole run, overridable. Every `$RANDOM` in the damage
+# path derives from it, so a failure replays exactly (see the note at the damage
+# site). Without this the gate could not distinguish a real defect from noise.
+SEED_BASE=${MOUNT_FUZZ_SEED:-20261016}
+lane_no=0
 
 # ---- preconditions, each named separately (a gate that silently skips is
 # ---- worse than no gate, because its own text tells you to ignore it)
@@ -297,6 +302,23 @@ for lane in strict lenient; do
     lane_iters=$(( ITERS / 2 ))
     [ "$lane" = strict ] && lane_iters=8
     for i in $(seq 1 "$lane_iters"); do
+        # DETERMINISTIC DAMAGE (M36). This used `$RANDOM`, which bash seeds from
+        # the pid and the clock, so the byte pattern differed on EVERY run. That
+        # makes the gate unable to answer the only question it exists for: a
+        # failure here cannot be replayed, and "iter 7" in one run says nothing
+        # about any other run.
+        #
+        # It already looked flaky -- a write landing wrong bytes appeared in some
+        # runs and not others -- and a flaky defect that cannot be seeded is not
+        # a defect anyone can fix. Seed it once, and let the seed be overridden so
+        # a failing one can be replayed exactly:
+        #
+        #     MOUNT_FUZZ_SEED=12345 bash tests/oracle/mount_fuzz.sh
+        #
+        # $RANDOM is re-seeded per lane rather than per iteration, because the
+        # lanes interleave and a per-iteration reseed would make iteration N
+        # depend on which lane got there first.
+        RANDOM=$(( (SEED_BASE + i * 31 + lane_no) % 32768 ))
         src="${SOURCES[$(( (i + 7) % ${#SOURCES[@]} ))]}"
         cp "$src" "$IMG" 2>/dev/null || continue
         size=$(stat -c%s "$IMG" 2>/dev/null || echo 0)
