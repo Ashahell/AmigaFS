@@ -59,8 +59,14 @@ if ! "$CC" -fsanitize=fuzzer,address,undefined -g -O1 \
 fi
 
 echo "M39: running $RUNS inputs"
+# -artifact_prefix keeps libFuzzer's crash/minimum/timeout artifacts OUT of the
+# repository. By default libFuzzer writes them to the current directory, and the
+# first mutant run of this gate left a 400-byte crash-* file in the repo root,
+# which `git add amigafs/` then committed. A gate that finds something must leave
+# its evidence somewhere deliberate, not in the tree.
 timeout 900 "$BIN" "$CORP" -runs="$RUNS" -max_len=65536 \
-    -timeout=10 -rss_limit_mb=2048 -print_final_stats=1 >"$W/out.log" 2>&1
+    -timeout=10 -rss_limit_mb=2048 -print_final_stats=1 \
+    -artifact_prefix="$W/" >"$W/out.log" 2>&1
 rc=$?
 
 if [ $rc -ne 0 ]; then
