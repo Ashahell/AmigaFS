@@ -81,6 +81,49 @@ if [ -z "${REL:-}" ]; then
     exit 1
 fi
 
+# ---- an unknown option must be NAMED, not blamed on the image --------------
+#
+# fuse_opt_parse leaves UNMATCHED options at the FRONT of the array, ahead of the
+# positionals: `-o ro` yields [prog] [-o] [ro] [image] [mnt]. Reading argv[1] as
+# the image then reported "cannot open image '-o'" -- telling the user their disk
+# image was broken when they had misspelled a flag. `ro` is the natural thing to
+# type precisely because read-only IS the default and there is no `ro` option for
+# it, so the most guessable flag had the most misleading message.
+#
+# This is a MESSAGE-QUALITY gate: it asserts on what the user is told, because the
+# defect was not a crash or a wrong volume but a sentence pointing at the wrong
+# thing. Nothing else in the suite would notice.
+opt_out() {
+    "$FUSE" -f "$W/v.adf" "$W/mnt" $1 2>&1 | head -6
+}
+mkdir -p "$W/mnt"
+msg=$(opt_out "-o ro")
+if printf '%s' "$msg" | grep -q "unknown option"; then
+    note "an unknown -o option is reported as such" "'-o ro'"
+else
+    bad "an unknown -o option is reported as such" "got: $(printf '%s' "$msg" | head -1)"
+fi
+if printf '%s' "$msg" | grep -q "cannot open image"; then
+    bad "an unknown option does NOT blame the image" "still says 'cannot open image'"
+else
+    note "an unknown option does NOT blame the image" "clean"
+fi
+if printf '%s' "$msg" | grep -qi "read-only is the DEFAULT"; then
+    note "the 'ro' case explains that read-only is the default" "yes"
+else
+    bad "the 'ro' case explains that read-only is the default" "no hint given"
+fi
+if opt_out "-o bogus_flag" | grep -q "bogus_flag"; then
+    note "an unknown option is named" "bogus_flag"
+else
+    bad "an unknown option is named" "not mentioned"
+fi
+if opt_out "-o ro" | grep -q -- "-o rw"; then
+    note "the help text now lists -o rw" "yes"
+else
+    bad "the help text now lists -o rw" "absent from usage()"
+fi
+
 echo "=== M43 gate (-o amiga_ids end to end) ==="
 echo "  patched $n file header(s) on $(basename "$FIXTURE"); stat'ing /$REL"
 

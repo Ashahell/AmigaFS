@@ -1278,6 +1278,7 @@ static const struct fuse_opt opts[] = {
 static void usage(const char *prog) {
     fprintf(stderr,
         "usage: %s <image> <mountpoint> [options]\n"
+        "  -o rw            open the volumes read-write (default read-only)\n"
         "  -o amiga_ids      expose stored Amiga uid/gid\n"
         "  -o tz=local       interpret dates as local time (default UTC)\n"
         "  -- -f             foreground\n"
@@ -1387,6 +1388,37 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     if (opts_args.argc < 3) { usage(argv[0]); return 1; }
+
+    /* fuse_opt_parse leaves UNMATCHED options at the FRONT of the array,
+     * ahead of the positional arguments, so a mistyped flag reads as the image:
+     *
+     *     -o ro      ->  [prog] [-o] [ro] [image] [mountpoint]
+     *
+     * and taking argv[1] as the image reported "cannot open image '-o'" --
+     * telling the user their disk image is broken when they had misspelled a
+     * flag. `ro` is the natural thing to type precisely because read-only IS the
+     * default and there is no `ro` option for it, so the one flag nobody would
+     * guess was also the one whose failure message pointed somewhere else.
+     * Naming the option is both correct and the whole cost of the fix.
+     *
+     * Any remaining token starting with '-' in the positional slots is an
+     * unmatched option by construction: fuse_opt has already consumed every
+     * option it recognised. */
+    if (opts_args.argv[1][0] == '-') {
+        const char *bad = opts_args.argv[1];
+        if (strcmp(bad, "-o") == 0 && opts_args.argc >= 4) {
+            fprintf(stderr, "amigafs: unknown option '-o %s'\n", opts_args.argv[2]);
+            if (strcmp(opts_args.argv[2], "ro") == 0)
+                fprintf(stderr,
+                    "  note: read-only is the DEFAULT; there is no 'ro' option.\n"
+                    "        Use '-o rw' to open the volumes read-write.\n");
+        } else {
+            fprintf(stderr, "amigafs: unknown option '%s'\n", bad);
+        }
+        usage(argv[0]);
+        return 1;
+    }
+
     const char *image = opts_args.argv[1];
     const char *mountpoint = opts_args.argv[2];
 
