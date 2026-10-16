@@ -33,18 +33,52 @@ static void set_err(char *errbuf, size_t errlen, const char *fmt, ...) {
 
 /* Read the DOS id from block 0, or block 1 if block 0 does not carry it
  * (some media place it there). Returns the flag byte, or 0xFF if absent. */
-static uint8_t read_dos_id(afs_volume_t *v, uint8_t *out_long) {
+/* Returns the DOS type digit if block 0 or 1 carries a "DOS" descriptor, else
+ * 0xFF. `raw4` -- when non-NULL -- always receives the first four bytes of the
+ * FIRST readable block, whatever they are.
+ *
+ * Those raw bytes exist so the refusal can NAME what it found. The previous
+ * message was "no DOS filesystem id on block 0 or block 1", which is true and
+ * useless: a user handing us an SFS or PFS volume gets told the volume has no
+ * filesystem id, when in fact it has one and it is simply not ours. That is the
+ * same shape M44 fixed for an unknown `-o` option -- do not blame the input,
+ * name the cause -- and it is worth as much here, because "this disk is not an
+ * AmigaDOS disk" and "this file is not a disk" send the user somewhere entirely
+ * different.
+ *
+ * SFS1, PFS1, IFFS, FS64 and DF64 all reach this path and are all correctly
+ * refused, because the descriptor's first three bytes must be exactly "DOS".
+ * That is a deliberate NAME check, not an accident of the & 0x07 masking, and
+ * m50 pins it so it cannot quietly regress.
+ */
+static uint8_t read_dos_id(afs_volume_t *v, uint8_t *raw4) {
     uint8_t blk[512];
     for (int which = 0; which < 2; which++) {
         if (blockdev_read(v->dev, (uint32_t)which, blk, sizeof blk) != 0)
             return 0xFF;
+        if (which == 0 && raw4) memcpy(raw4, blk, 4);
         uint32_t longval = be32(blk);
-        if ((longval & 0xFFFFFF00u) == DOS_ID_BASE) {
-            if (out_long) *out_long = blk[3];
+        if ((longval & 0xFFFFFF00u) == DOS_ID_BASE)
             return blk[3];
-        }
     }
     return 0xFF;
+}
+
+/* One message for "there is a filesystem id here, and it is not AmigaDOS".
+ * Prints it only when the bytes are printable, so a zeroed or binary block still
+ * gets the original wording rather than four control characters. */
+static void set_err_nondos(char *errbuf, size_t errlen, const uint8_t *raw4) {
+    int printable = raw4 && raw4[0] && raw4[1] && raw4[2] && raw4[3] &&
+                    raw4[0] >= 0x20 && raw4[0] < 0x7f &&
+                    raw4[1] >= 0x20 && raw4[1] < 0x7f &&
+                    raw4[2] >= 0x20 && raw4[2] < 0x7f &&
+                    raw4[3] >= 0x20 && raw4[3] < 0x7f;
+    if (printable)
+        set_err(errbuf, errlen,
+                "filesystem id '%c%c%c%c' is not an AmigaDOS filesystem "
+                "(only DOS\\0-DOS\\5)", raw4[0], raw4[1], raw4[2], raw4[3]);
+    else
+        set_err(errbuf, errlen, "no DOS filesystem id on block 0 or block 1");
 }
 
 /* The single rootblock formula: INT((Reserved + highKey)/2). For floppies
@@ -115,7 +149,7 @@ int afs_volume_open_memory(void *data, size_t size, size_t bsize,
     uint8_t idbuf[8];
     uint8_t flags = read_dos_id(v, idbuf);
     if (flags == 0xFF) {
-        set_err(errbuf, errlen, "no DOS filesystem id on block 0 or block 1");
+        set_err_nondos(errbuf, errlen, idbuf);
         blockdev_close(v->dev);
         free(v);
         return -1;
@@ -184,9 +218,10 @@ static int open_window_impl(const char *path, size_t bsize,
     }
     v->block_count = blockdev_block_count(v->dev);
 
-    uint8_t flags = read_dos_id(v, NULL);
+    uint8_t idbuf[8];
+    uint8_t flags = read_dos_id(v, idbuf);
     if (flags == 0xFF) {
-        set_err(errbuf, errlen, "no DOS filesystem id on block 0 or block 1");
+        set_err_nondos(errbuf, errlen, idbuf);
         blockdev_close(base);
         free(v);
         return -1;
