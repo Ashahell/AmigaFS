@@ -341,21 +341,38 @@ int afs_bitmap_rebuild(afs_volume_t *v, afs_bitmap_rebuild_stats_t *stats,
         return -1;
     }
 
-    /* The page list is zero-terminated; more pages than the volume needs means
-     * map bits describing blocks outside it (g1a30c.adf's second page IS a live
-     * directory entry). Rebuild to the correct size rather than trusting it --
-     * that is exactly what a rescan is for. */
+    /* The page count is DERIVED, never trusted. ADFlib computes it outright
+     * (adf_bitm.c:1007 nBlock2bitmapSize, ADF_BM_MAP_SIZE = 127) and uses only
+     * that many entries -- it never compares the stored list against the
+     * derived one, and it explicitly declines to "repair" entries beyond the
+     * derived size (the comment at adf_bitm.c:1024 gives the reason: software
+     * may keep its own data there, and "repairing" it would damage it).
+     *
+     * g1a30c.adf lists TWO pages where one is derivable, and its second entry
+     * is a block the tree already uses. Consulting it as bitmap data would read
+     * a live block as map bits and corrupt the rebuild -- which is why the
+     * extra entries are ignored rather than followed. It is also why the
+     * previous version REFUSED here: correct about the hazard, wrong about the
+     * response, because the remedy it named (repair the page list) does not
+     * exist and no command can perform it. A refusal that names a missing
+     * remedy is worse than no refusal -- it sends the user to do a thing they
+     * cannot do -- and it left the volume permanently unwritable, since a stale
+     * map is exactly what refuses writes. */
     size_t want_pages = afs_bitmap_pages_required(nblocks, bs);
 
     uint32_t pages[25];
     size_t npages = 0;
     for (int i = 0; i < 25 && root->bm_pages[i] != 0; i++) pages[npages++] = root->bm_pages[i];
-    if (npages != want_pages) {
+
+    /* Too FEW is the case that cannot be worked around: the map would be
+     * incomplete and any free-block answer from it would be a guess. */
+    if (npages < want_pages) {
         rb_err(errbuf, errlen,
-               "volume lists %zu bitmap pages but needs %zu; rebuild needs the "
-               "page list repaired first", npages, want_pages);
+               "volume lists %zu bitmap pages but needs %zu", npages, want_pages);
         return -1;
     }
+    npages = want_pages;
+
     for (size_t i = 0; i < npages; i++) {
         if (pages[i] >= nblocks) {
             rb_err(errbuf, errlen, "bitmap page %zu points outside the volume",
